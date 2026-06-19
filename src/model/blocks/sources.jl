@@ -1,0 +1,82 @@
+module BlocksSources
+
+using ..Types
+using ..BlocksCommon
+
+import ..BlocksAPI: evaluate!
+
+export ConstantBlock, StepBlock, SineBlock
+
+# ------------------------------------------
+
+mutable struct ConstantBlock <: AbstractBlock
+    base::BlockBase
+    value::Float64
+    name::String
+    position::Tuple{Float64, Float64}
+end
+
+function ConstantBlock(value::Float64; name="const_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase(Symbol[], [:out])
+    ConstantBlock(base, value, name, position)
+end
+
+function evaluate!(b::ConstantBlock, _t, _dt)
+    b.base.outputs[:out].value = b.value
+end
+
+# ------------------------------------------
+
+mutable struct StepBlock <: AbstractBlock
+    base::BlockBase
+    step_time::Float64
+    before::Float64
+    after::Float64
+    name::String
+    position::Tuple{Float64, Float64}
+end
+
+"""
+    StepBlock(; step_time, before, after, name, position)
+
+Outputs `before` for t < step_time, then `after` for t >= step_time.
+"""
+function StepBlock(; step_time=1.0, before=0.0, after=1.0,
+                     name="step_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase(Symbol[], [:out])
+    StepBlock(base, step_time, before, after, name, position)
+end
+
+function evaluate!(b::StepBlock, t, _dt)
+    b.base.outputs[:out].value = t >= b.step_time ? b.after : b.before
+end
+
+# ------------------------------------------
+
+mutable struct SineBlock <: AbstractBlock
+    base      :: BlockBase
+    amplitude :: Float64
+    frequency :: Float64
+    phase     :: Float64
+    offset    :: Float64
+    name      :: String
+    position  :: Tuple{Float64, Float64}
+end
+
+"""
+    SineBlock(; amplitude, frequency, phase, offset, name, position)
+
+Outputs `amplitude * sin(2π * frequency * t + phase) + offset`.
+"""
+function SineBlock(; amplitude=1.0, frequency=1.0, phase=0.0, offset=0.0,
+                     name="sine_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase(Symbol[], [:out])
+    SineBlock(base, amplitude, frequency, phase, offset, name, position)
+end
+
+function evaluate!(b::SineBlock, t, _dt)
+    b.base.outputs[:out].value =
+        b.amplitude * sin(2π * b.frequency * t + b.phase) + b.offset
+end
+
+end

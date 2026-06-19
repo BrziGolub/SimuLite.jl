@@ -1,0 +1,7 @@
+name = "SimuLite"
+uuid = "81c83494-d4e4-4fd2-9a0e-9c0825ccac36"
+version = "0.1.0"
+authors = ["Petar Kovacevic <petarkovacevic58@gmail.com>"]
+[deps]
+ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
+DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
