@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-19)
+## Current state (as of session 2026-06-20)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
@@ -62,7 +62,9 @@ src/
   sim/
     compiler.jl             — ODE compiler via ModelingToolkit
     runner.jl               — fixed-step simulation loop
-  gui/                      — NEXT PHASE (empty)
+  gui/
+    canvas.jl               — full GUI: canvas, palette, properties,
+                              toolbar, results (draw_diagram)
 ```
 
 ---
@@ -74,107 +76,55 @@ src/
 - **`SumBlock` takes a signs string** — `"+-"` enables subtraction for feedback error signals.
 - **Two simulation backends** — runner (fixed-step, fast, used by GUI); compiler (MTK ODE, accurate, available as advanced mode).
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
+- **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
 
 ---
 
-## Next phase — GUI
+## GUI — COMPLETE (Phases 1–6)
 
-### Library choice: GLMakie
-Recommended over Gtk/Qt/web approaches because:
-- Handles both the diagram canvas and results plots in one framework
-- Native Julia, no external toolchain
-- Has mouse/keyboard event system sufficient for drag-and-drop
-- Observable-based reactivity fits the diagram-as-state model
-- Already familiar to anyone in the Julia scientific computing ecosystem
+### What `draw_diagram(diagram)` gives you
+Opening the GUI with `draw_diagram(d)` shows a 4-row window:
 
-Add to `Project.toml`: `GLMakie`
+| Area | Location | Purpose |
+|---|---|---|
+| Canvas | top-left (55%) | Drag blocks, draw wires |
+| Palette | top-middle (130px) | Click to add new blocks |
+| Properties | top-right (190px) | Edit selected block parameters |
+| Toolbar | row 2 | Run, tspan, dt, Clear |
+| Results | row 3 (30%) | Signal plots after Run |
+| Status bar | row 4 | Current action / error messages |
 
----
-
-### GUI Phase 1 — Canvas rendering (no interaction)
-**Goal:** display a diagram on screen. Nothing is clickable yet.
-
-- Open a `GLMakie` Figure with two panels: left = canvas, right = results (empty for now)
-- Render each block as a labeled rectangle at `block.position`
-- Render each port as a small circle on the block edge (left side = inputs, right side = outputs)
-- Render each connection as a bezier curve from src output port to dst input port
-- Create `src/gui/canvas.jl` with a `draw_diagram(diagram)` function
-
-**Done when:** `draw_diagram(d)` opens a window showing the current diagram correctly.
-
----
-
-### GUI Phase 2 — Block selection and dragging
-**Goal:** click a block to select it, drag it to reposition.
-
-- Track selected block in a `Ref{Union{Nothing, AbstractBlock}}`
-- On mouse press: hit-test against block bounding boxes, set selected block
-- On mouse drag: update `block.position`, redraw canvas
-- Highlight selected block with a different border color
-- Escape / click empty space = deselect
-
-**Done when:** blocks can be moved around the canvas by dragging.
+### Interactions implemented
+| Action | How |
+|---|---|
+| Add block | Click palette button → placed at canvas center |
+| Move block | Drag with left mouse; bezier wires follow live |
+| Select block | Left click → blue border + properties panel opens |
+| Edit params | Type in properties textbox, press Enter |
+| Rename block | Edit "Name" field in properties → canvas label updates |
+| Draw connection | Click output port (red) → click input port (blue) |
+| Cancel wire | Escape |
+| Delete block | Select → Delete key; removes block + all its connections |
+| Run simulation | Click ▶ Run; signal plots appear in Results panel |
+| Change tspan/dt | Edit toolbar textboxes before running |
+| Clear diagram | Click Clear button |
+| Zoom / pan canvas | Scroll to zoom; double-click to reset view |
 
 ---
 
-### GUI Phase 3 — Connection drawing
-**Goal:** click an output port, then click an input port to wire them.
+## Remaining work
 
-- Track "wire in progress" state: source block + port stored in a Ref
-- On click of an output port: enter wire-drawing mode, draw a rubber-band line to cursor
-- On click of an input port: call `connect!(diagram, src, src_port, dst, dst_port)`, exit wire mode
-- If `connect!` throws a `PortAlreadyConnectedError` or `PortNotFoundError`: show error label, cancel
-- On Escape: cancel wire-drawing
-
-**Done when:** connections can be drawn interactively and appear on the canvas.
-
----
-
-### GUI Phase 4 — Block palette
-**Goal:** add new blocks to the diagram from the GUI.
-
-- Add a sidebar panel listing all available block types
-- Click a block type → places it at a default position on the canvas with a generated name
-- Double-click a block to rename it (inline text edit)
-- Delete key on selected block → calls `remove_block!`, redraws
-
-**Done when:** a full diagram can be built from scratch without writing Julia code.
-
----
-
-### GUI Phase 5 — Properties panel
-**Goal:** view and edit block parameters when a block is selected.
-
-- When a block is selected, show its editable fields in a right panel:
-  - `ConstantBlock` → value
-  - `GainBlock` → k
-  - `StepBlock` → step_time, before, after
-  - `SineBlock` → amplitude, frequency, phase, offset
-  - `IntegratorBlock` → initial state x0
-  - All blocks → name, position (numeric fields)
-- Changes apply immediately to the block struct
-
-**Done when:** block parameters can be changed without touching Julia code.
-
----
-
-### GUI Phase 6 — Simulation control and results
-**Goal:** run the simulation and display output plots.
-
-- Add toolbar: Run button, simulation config fields (tspan start/end, dt)
-- Run button: calls `simulate(diagram)`, stores `SimResult`
-- Results panel: one plot per output signal in `SimResult.data`, x-axis = `result.t`
-- Error display: if `simulate` throws (e.g. cycle detected), show message in GUI
-- Clear button: resets the diagram
-
-**Done when:** the full workflow — build diagram → run → see plots — works entirely in the GUI.
-
----
-
-### GUI Phase 7 — Save and load  *(post-demo, if time allows)*
+### GUI Phase 7 — Save and load *(optional, post-demo)*
 - Serialize `BlockDiagram` to JSON (block types, params, positions, connections)
-- File open/save dialogs via `GLMakie` or system dialog
-- Load reconstructs the Julia objects and redraws the canvas
+- File open/save dialogs
+- Load reconstructs Julia objects and redraws canvas
+
+### Polish items (if time allows)
+- Block type label displayed inside the rectangle (e.g. "Gain" above the name)
+- Port name labels on hover
+- Snap-to-grid for block positioning
+- Undo/redo stack
+- Rename validation (reject empty names, reject duplicate names before committing)
 
 ---
 
