@@ -6,6 +6,7 @@ import ..BlocksAPI: input_ports, output_ports
 import ..Diagram: connect!, add_block!, remove_block!, disconnect!
 import ..BlocksSources: ConstantBlock, StepBlock, SineBlock
 import ..BlocksMath: GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock
+import ..BlocksSinks: ScopeBlock
 import ..Runner: simulate
 using JSON3
 
@@ -15,6 +16,14 @@ const BLOCK_W  = 1.2
 const BLOCK_H  = 0.7
 const PORT_PX  = 12
 const PORT_HIT = 0.18
+
+# Height scales up for blocks with many ports so hit-circles never overlap.
+# Minimum spacing between adjacent ports must exceed PORT_HIT.
+# With frac-step = h/(n+1) we need h/(n+1) > PORT_HIT → h > PORT_HIT*(n+1).
+# Factor 1.4 gives comfortable margin.
+_block_height(block) =
+    max(BLOCK_H, PORT_HIT * 1.4 * (max(length(input_ports(block)),
+                                        length(output_ports(block))) + 1))
 
 # ── Internal visual tracking ──────────────────────────────────────────────────
 
@@ -62,9 +71,9 @@ function _arrowhead(src::Point2f, dst::Point2f)
     ]
 end
 
-function _hit_block(center, pos)
+function _hit_block(center, pos, bh = BLOCK_H)
     abs(pos[1] - center[1]) <= BLOCK_W / 2 &&
-    abs(pos[2] - center[2]) <= BLOCK_H / 2
+    abs(pos[2] - center[2]) <= bh / 2
 end
 
 function _hit_port(port_pos, pos)
@@ -93,6 +102,7 @@ end
 
 function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_type)
     cx, cy = block.position
+    bh = _block_height(block)
     c  = Observable(Point2f(cx, cy))
     sc = Observable{Symbol}(:black)
     block_centers[block] = c
@@ -104,20 +114,20 @@ function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_t
 
     for (i, p) in enumerate(iports)
         frac = Float64(i) / (ni + 1) - 0.5
-        port_pos[(block, p)]  = @lift Point2f($c[1] - BLOCK_W/2, $c[2] + BLOCK_H * frac)
+        port_pos[(block, p)]  = @lift Point2f($c[1] - BLOCK_W/2, $c[2] + bh * frac)
         port_type[(block, p)] = :input
     end
     for (i, p) in enumerate(oports)
         frac = Float64(i) / (no + 1) - 0.5
-        port_pos[(block, p)]  = @lift Point2f($c[1] + BLOCK_W/2, $c[2] + BLOCK_H * frac)
+        port_pos[(block, p)]  = @lift Point2f($c[1] + BLOCK_W/2, $c[2] + bh * frac)
         port_type[(block, p)] = :output
     end
 
     rect_pts = @lift Point2f[
-        ($c[1] - BLOCK_W/2, $c[2] - BLOCK_H/2),
-        ($c[1] + BLOCK_W/2, $c[2] - BLOCK_H/2),
-        ($c[1] + BLOCK_W/2, $c[2] + BLOCK_H/2),
-        ($c[1] - BLOCK_W/2, $c[2] + BLOCK_H/2),
+        ($c[1] - BLOCK_W/2, $c[2] - bh/2),
+        ($c[1] + BLOCK_W/2, $c[2] - bh/2),
+        ($c[1] + BLOCK_W/2, $c[2] + bh/2),
+        ($c[1] - BLOCK_W/2, $c[2] + bh/2),
     ]
     rect  = poly!(ax, rect_pts;
         color = RGBf(0.93, 0.96, 1.0), strokecolor = sc, strokewidth = 2)
@@ -204,6 +214,8 @@ function save_diagram(diagram::BlockDiagram, path::String)
             Dict("state" => b.state)
         elseif b isa UnitDelayBlock
             Dict("state" => b.state)
+        elseif b isa ScopeBlock
+            Dict("title" => b.title, "n_ports" => b.n_ports)
         else
             Dict{String,Any}()
         end
@@ -252,12 +264,63 @@ function _reconstruct_block(type_name::String, name::String, position, params)
         IntegratorBlock(pf(:state, 0.0))
     elseif type_name == "UnitDelayBlock"
         UnitDelayBlock(pf(:state, 0.0))
+    elseif type_name == "ScopeBlock"
+        ScopeBlock(; title   = ps(:title, "Scope"),
+                     n_ports = Int(get(params, :n_ports, 1)))
     else
         error("Unknown block type in file: $type_name")
     end
     b.name     = name
     b.position = (Float64(position[1]), Float64(position[2]))
     return b
+end
+
+# ── Scope window ──────────────────────────────────────────────────────────────
+
+function _open_scope_window!(scope_block, result, diagram, scope_screens)
+    # Close previous window for this block before opening a fresh one.
+    # Separate screen creation from display so we own the reference regardless
+    # of what display() returns.
+    if haskey(scope_screens, scope_block)
+        prev = scope_screens[scope_block]
+        try
+            prev.window_open[] && close(prev)
+        catch _
+        end
+        delete!(scope_screens, scope_block)
+    end
+
+    fig = Figure(size = (720, 450))
+    ax  = Axis(fig[1, 1];
+        title  = scope_block.title,
+        xlabel = "t",
+        ylabel = "signal")
+
+    n_plotted = 0
+    for i in 1:scope_block.n_ports
+        port_sym = Symbol("in$i")
+        for c in diagram.connections
+            if c.dst_block === scope_block && c.dst_port == port_sym
+                key = "$(c.src_block.name).$(c.src_port)"
+                if haskey(result.data, key)
+                    lines!(ax, result.t, result.data[key]; label = key)
+                    n_plotted += 1
+                end
+                break
+            end
+        end
+    end
+
+    n_plotted == 0 && return   # nothing connected — skip opening a window
+
+    n_plotted > 1 && axislegend(ax; position = :lt)
+    autolimits!(ax)
+
+    # Create screen first so we own the reference; then display the figure in it.
+    # Window title includes block name to guarantee OS-level uniqueness.
+    screen = GLMakie.Screen(title = "$(scope_block.title) [$(scope_block.name)]")
+    display(screen, fig)
+    scope_screens[scope_block] = screen
 end
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -285,8 +348,12 @@ function draw_diagram(diagram::BlockDiagram)
     _res = try; GLMakie.primary_resolution(); catch; (1600, 900); end
     fig = Figure(size = (round(Int, _res[1] * 0.92), round(Int, _res[2] * 0.88)))
 
-    # ── Row 1: canvas | palette | properties ─────────────────────────────────
-    ax = Axis(fig[1, 1];
+    # ── Row 1: simulation toolbar (full width) ───────────────────────────────
+    toolbar = GridLayout(fig[1, 1:3])
+    rowsize!(fig.layout, 1, Auto(false))
+
+    # ── Row 2: canvas | palette | properties ─────────────────────────────────
+    ax = Axis(fig[2, 1];
         leftspinecolor   = RGBf(0.30, 0.50, 0.78),
         rightspinecolor  = RGBf(0.30, 0.50, 0.78),
         bottomspinecolor = RGBf(0.30, 0.50, 0.78),
@@ -296,22 +363,21 @@ function draw_diagram(diagram::BlockDiagram)
     hidedecorations!(ax)
     limits!(ax, -2.0, 14.0, -6.0, 6.0)
 
-    palette_grid   = GridLayout(fig[1, 2])
-    btn_tab_blocks = Button(palette_grid[1, 1]; label = "Blocks", tellwidth = true)
-    btn_tab_file   = Button(palette_grid[2, 1]; label = "File",   tellwidth = true)
+    palette_grid    = GridLayout(fig[2, 2])
+    btn_tab_sources = Button(palette_grid[1, 1]; label = "Sources", tellwidth = true)
+    btn_tab_math    = Button(palette_grid[2, 1]; label = "Math",    tellwidth = true)
+    btn_tab_sinks   = Button(palette_grid[3, 1]; label = "Sinks",   tellwidth = true)
+    btn_tab_file    = Button(palette_grid[4, 1]; label = "File",    tellwidth = true)
+    all_tab_btns    = [btn_tab_sources, btn_tab_math, btn_tab_sinks, btn_tab_file]
 
-    props_grid = GridLayout(fig[1, 3])
+    props_grid = GridLayout(fig[2, 3])
     Label(props_grid[1, 1:2], "Properties"; fontsize = 13, halign = :center)
 
     colsize!(fig.layout, 1, Auto())      # canvas: fills space left by sidebars
     colsize!(fig.layout, 2, Fixed(140))  # palette
     colsize!(fig.layout, 3, Fixed(200))  # properties
 
-    rowsize!(fig.layout, 1, Relative(0.60))  # canvas: 60% of window height
-
-    # ── Row 2: simulation toolbar (full width) ────────────────────────────────
-    toolbar = GridLayout(fig[2, 1:3])
-    rowsize!(fig.layout, 2, Auto(false))
+    rowsize!(fig.layout, 2, Relative(0.88))  # canvas: fills most of the window
 
     btn_run = Button(toolbar[1, 1]; label = "▶  Run")
     Label(toolbar[1, 2], "  t:";  tellwidth = false)
@@ -325,17 +391,10 @@ function draw_diagram(diagram::BlockDiagram)
         displayed_string = string(diagram.config.dt), width = 60)
     btn_clear = Button(toolbar[1, 8]; label = "Clear")
 
-    # ── Row 3: results axis (full width) ─────────────────────────────────────
-    results_ax = Axis(fig[3, 1:3],
-        title  = "Results",
-        xlabel = "t",
-        ylabel = "signal")
-    rowsize!(fig.layout, 3, Relative(0.28))  # results: 28% of window height
-
-    # ── Row 4: status bar ─────────────────────────────────────────────────────
+    # ── Row 3: status bar ─────────────────────────────────────────────────────
     status = Observable("Build a diagram, then click ▶ Run")
-    Label(fig[4, 1:3], status; tellwidth = false, fontsize = 12)
-    rowsize!(fig.layout, 4, Auto(false))
+    Label(fig[3, 1:3], status; tellwidth = false, fontsize = 12)
+    rowsize!(fig.layout, 3, Auto(false))
 
     deregister_interaction!(ax, :rectanglezoom)
 
@@ -346,7 +405,8 @@ function draw_diagram(diagram::BlockDiagram)
     port_type      = Dict{Tuple{Any, Symbol}, Symbol}()
     block_visuals  = Dict{AbstractBlock, BlockVisual}()
     conn_visuals   = Dict{Connection,    ConnVisual}()
-    results_legend = Ref{Any}(nothing)
+    scope_screens  = Dict{AbstractBlock, Any}()
+    last_result    = Ref{Union{Nothing, SimResult}}(nothing)
 
     # ── Draw existing diagram ─────────────────────────────────────────────────
     for block in diagram.blocks
@@ -439,6 +499,12 @@ function draw_diagram(diagram::BlockDiagram)
             end)
         elseif block isa SumBlock
             add_field!("Signs", block.signs, s -> block.signs = s)
+        elseif block isa ScopeBlock
+            add_field!("Title", block.title, s -> block.title = s)
+            push!(prop_items[],
+                Label(props_grid[row[], 1:2], "Ports: $(block.n_ports)  (set via palette)";
+                    fontsize = 11, halign = :left, color = :gray50))
+            row[] += 1
         end
     end
 
@@ -463,11 +529,10 @@ function draw_diagram(diagram::BlockDiagram)
                 block_centers, block_strokes, port_pos, port_type,
                 block_visuals, conn_visuals)
         end
-        empty!(results_ax)
-        if results_legend[] !== nothing
-            delete!(results_legend[])
-            results_legend[] = nothing
+        for (_, screen) in scope_screens
+            try; screen.window_open[] && close(screen); catch _; end
         end
+        empty!(scope_screens)
     end
 
     function _cancel_wire!()
@@ -538,7 +603,7 @@ function draw_diagram(diagram::BlockDiagram)
                 else
                     _deselect!()
                     for block in reverse(diagram.blocks)
-                        if _hit_block(block_centers[block][], pos)
+                        if _hit_block(block_centers[block][], pos, _block_height(block))
                             selected[]             = block
                             c                      = block_centers[block][]
                             drag_offset[]          = (c[1] - pos[1], c[2] - pos[2])
@@ -559,6 +624,21 @@ function draw_diagram(diagram::BlockDiagram)
                             end
                         end
                     end
+                end
+            end
+
+        elseif event.type == MouseEventTypes.leftdoubleclick
+            for block in reverse(diagram.blocks)
+                if _hit_block(block_centers[block][], pos, _block_height(block))
+                    if block isa ScopeBlock
+                        if last_result[] !== nothing
+                            _open_scope_window!(block, last_result[], diagram, scope_screens)
+                            status[] = "Scope '$(block.title)' opened"
+                        else
+                            status[] = "Run the simulation first, then double-click a Scope block"
+                        end
+                    end
+                    break
                 end
             end
 
@@ -618,59 +698,71 @@ function draw_diagram(diagram::BlockDiagram)
         ("Sine",      () -> SineBlock()),
     ]
     math_pal = [
-        ("Gain",        () -> GainBlock(1.0)),
-        ("Sum  ++",     () -> SumBlock("++")),
-        ("Sum  +-",     () -> SumBlock("+-")),
-        ("Integrator",  () -> IntegratorBlock(0.0)),
-        ("Unit Delay",  () -> UnitDelayBlock(0.0)),
+        ("Gain",       () -> GainBlock(1.0)),
+        ("Sum  ++",    () -> SumBlock("++")),
+        ("Sum  +-",    () -> SumBlock("+-")),
+        ("Integrator", () -> IntegratorBlock(0.0)),
+        ("Unit Delay", () -> UnitDelayBlock(0.0)),
+    ]
+    sinks_pal = [
+        ("Scope",    () -> ScopeBlock()),
+        ("Scope ×2", () -> ScopeBlock(n_ports = 2)),
+        ("Scope ×3", () -> ScopeBlock(n_ports = 3)),
     ]
 
-    function show_blocks_tab!()
-        clear_pal!()
-        btn_tab_blocks.buttoncolor[] = RGBf(0.30, 0.50, 0.78)
-        btn_tab_file.buttoncolor[]   = RGBf(0.85, 0.85, 0.85)
-        row = Ref(3)
-
-        function pal_cat!(text)
-            lbl = Label(palette_grid[row[], 1], text;
-                fontsize = 11, halign = :center, color = :gray50)
-            push!(pal_items[], lbl)
-            row[] += 1
+    function _set_active_tab!(active_btn)
+        for btn in all_tab_btns
+            btn.buttoncolor[] = btn === active_btn ?
+                RGBf(0.30, 0.50, 0.78) : RGBf(0.85, 0.85, 0.85)
         end
+    end
 
-        function pal_block!(lbl_text, factory)
-            btn = Button(palette_grid[row[], 1]; label = lbl_text, tellwidth = true)
-            on(btn.clicks) do _
-                block = factory()
-                r = ax.finallimits[]
-                block.position = (Float64(r.origin[1] + r.widths[1] / 2),
-                                  Float64(r.origin[2] + r.widths[2] / 2))
-                try
-                    add_block!(diagram, block)
-                catch e
-                    status[] = e isa DiagramError ? sprint(showerror, e) : "Error — see REPL"
-                    e isa DiagramError || rethrow(e)
-                    return
-                end
-                block_visuals[block] = _setup_block!(ax, block,
-                    block_centers, block_strokes, port_pos, port_type)
-                status[] = "Added $(block.name) — drag to position"
+    # Appends one block button to the palette. Tab buttons occupy rows 1-4,
+    # so content starts at row 5; index into pal_items[] gives the offset.
+    function _pal_block!(lbl_text, factory)
+        row = length(pal_items[]) + 5
+        btn = Button(palette_grid[row, 1]; label = lbl_text, tellwidth = true)
+        on(btn.clicks) do _
+            block = factory()
+            r = ax.finallimits[]
+            block.position = (Float64(r.origin[1] + r.widths[1] / 2),
+                              Float64(r.origin[2] + r.widths[2] / 2))
+            try
+                add_block!(diagram, block)
+            catch e
+                status[] = e isa DiagramError ? sprint(showerror, e) : "Error — see REPL"
+                e isa DiagramError || rethrow(e)
+                return
             end
-            push!(pal_items[], btn)
-            row[] += 1
+            block_visuals[block] = _setup_block!(ax, block,
+                block_centers, block_strokes, port_pos, port_type)
+            status[] = "Added $(block.name) — drag to position"
         end
+        push!(pal_items[], btn)
+    end
 
-        pal_cat!("─ Sources ─")
-        for (lbl, factory) in sources_pal; pal_block!(lbl, factory); end
-        pal_cat!("─ Math ─")
-        for (lbl, factory) in math_pal;    pal_block!(lbl, factory); end
+    function show_sources_tab!()
+        clear_pal!()
+        _set_active_tab!(btn_tab_sources)
+        for (lbl, factory) in sources_pal; _pal_block!(lbl, factory); end
+    end
+
+    function show_math_tab!()
+        clear_pal!()
+        _set_active_tab!(btn_tab_math)
+        for (lbl, factory) in math_pal; _pal_block!(lbl, factory); end
+    end
+
+    function show_sinks_tab!()
+        clear_pal!()
+        _set_active_tab!(btn_tab_sinks)
+        for (lbl, factory) in sinks_pal; _pal_block!(lbl, factory); end
     end
 
     function show_file_tab!()
         clear_pal!()
-        btn_tab_blocks.buttoncolor[] = RGBf(0.85, 0.85, 0.85)
-        btn_tab_file.buttoncolor[]   = RGBf(0.30, 0.50, 0.78)
-        row = Ref(3)
+        _set_active_tab!(btn_tab_file)
+        row = Ref(5)
 
         function fadd!(w); push!(pal_items[], w); row[] += 1; w; end
 
@@ -730,9 +822,11 @@ function draw_diagram(diagram::BlockDiagram)
         end
     end
 
-    on(btn_tab_blocks.clicks) do _; show_blocks_tab!(); end
-    on(btn_tab_file.clicks)   do _; show_file_tab!();   end
-    show_blocks_tab!()
+    on(btn_tab_sources.clicks) do _; show_sources_tab!(); end
+    on(btn_tab_math.clicks)    do _; show_math_tab!();    end
+    on(btn_tab_sinks.clicks)   do _; show_sinks_tab!();   end
+    on(btn_tab_file.clicks)    do _; show_file_tab!();    end
+    show_sources_tab!()
 
     # ── Toolbar: SimConfig textboxes ──────────────────────────────────────────
     on(tb_tstart.stored_string) do s
@@ -751,21 +845,13 @@ function draw_diagram(diagram::BlockDiagram)
     # ── Toolbar: Run button ───────────────────────────────────────────────────
     on(btn_run.clicks) do _
         try
-            result = simulate(diagram)
-            empty!(results_ax)
-            if results_legend[] !== nothing
-                delete!(results_legend[])
-                results_legend[] = nothing
-            end
-            for (sig_name, vals) in sort(collect(result.data))
-                lines!(results_ax, result.t, vals; label = sig_name)
-            end
-            if !isempty(result.data)
-                results_legend[] = axislegend(results_ax; position = :lt)
-            end
-            autolimits!(results_ax)
+            result       = simulate(diagram)
+            last_result[] = result
             n = length(result.t)
-            status[] = "Run complete — $(n) steps, $(length(result.data)) signals plotted"
+            ns = count(b -> b isa ScopeBlock, diagram.blocks)
+            status[] = ns > 0 ?
+                "Run complete — $(n) steps — double-click a Scope block to view signals" :
+                "Run complete — $(n) steps (add a Scope block to view signals)"
         catch e
             status[] = "Run failed: $(sprint(showerror, e))"
             @warn "Simulation error" exception = (e, catch_backtrace())

@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-20)
+## Current state (as of session 2026-06-20 — session 2)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
@@ -33,6 +33,37 @@ Target: working GUI on top of a solid simulation engine.
 | `SumBlock` | math | `SumBlock("+-")` | Configurable signs per input port |
 | `IntegratorBlock` | math | `IntegratorBlock(x0; name)` | Forward Euler, feeds MTK ODE compiler |
 | `UnitDelayBlock` | math | `UnitDelayBlock(x0)` | Discrete z⁻¹ |
+| `ScopeBlock` | sinks | `ScopeBlock(; title, n_ports)` | Opens dedicated plot window on double-click; 1–3 input ports |
+
+### Missing blocks (planned — from reference catalog)
+
+#### Sources *(trivial, no new dependencies)*
+| Block | Constructor | Output |
+|---|---|---|
+| `RampBlock` | `RampBlock(; slope, start_time, bias)` | `bias + (t >= start_time) ? slope*(t-start_time) : 0` |
+| `ClockBlock` | `ClockBlock()` | `y = t` |
+
+#### Math *(feedthrough unless noted)*
+| Block | Constructor | Notes |
+|---|---|---|
+| `ProductBlock` | `ProductBlock(ops)` | `ops` is `Vector{Symbol}` of `:mul`/`:div` per port |
+| `SaturationBlock` | `SaturationBlock(; lower, upper)` | `clamp(u, lower, upper)` |
+| `AbsBlock` | `AbsBlock()` | `y = abs(u)` |
+| `LookupTable1DBlock` | `LookupTable1DBlock(bp, vals)` | Linear interp, clamp extrapolation |
+| `DerivativeBlock` | `DerivativeBlock(; N)` | Filtered derivative `H(s)=Ns/(s+N)`, 1 state var |
+
+#### Control *(stateful, pure Julia — no ControlSystems.jl needed)*
+| Block | Constructor | Notes |
+|---|---|---|
+| `PIDBlock` | `PIDBlock(; Kp, Ki, Kd, N, out_min, out_max)` | 2 state vars (xi, xd); direct state-space form |
+
+> `TransferFnBlock` and `StateSpaceBlock` from the reference require `ControlSystems.jl` and are deferred to the post-thesis backlog to keep dependencies minimal.
+
+#### Sinks *(0 outputs, no state)*
+| Block | Constructor | Notes |
+|---|---|---|
+| `WorkspaceBlock` | `WorkspaceBlock(; var_name)` | Saves `(t, y)` to `SimResult.workspace[var_name]` |
+| `TerminatorBlock` | `TerminatorBlock()` | No-op sink — silences unconnected output warnings |
 
 ### Known limitations (deferred)
 - No algebraic loop solving — cycles in the diagram error out
@@ -58,12 +89,13 @@ src/
       sources.jl            — ConstantBlock, StepBlock, SineBlock
       math.jl               — GainBlock, SumBlock, IntegratorBlock,
                               UnitDelayBlock
+      sinks.jl              — ScopeBlock
   sim/
     compiler.jl             — ODE compiler via ModelingToolkit
     runner.jl               — fixed-step simulation loop
   gui/
-    canvas.jl               — full GUI: canvas, palette (tabbed),
-                              properties, toolbar, results,
+    canvas.jl               — full GUI: canvas, palette (4 tabs),
+                              properties, toolbar, scope windows,
                               save/load (draw_diagram)
 test/
   runtests.jl               — (planned) main test entry point
@@ -79,29 +111,31 @@ test/
 - **Two simulation backends** — runner (fixed-step, fast, used by GUI); compiler (MTK ODE, accurate, available as advanced mode).
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
 - **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
-- **Tabbed palette** — "Blocks" and "File" tabs share the same 140px sidebar column; tab switching clears and rebuilds the content area dynamically (same delete/recreate pattern as the Properties panel).
+- **4-tab palette** — "Sources", "Math", "Sinks", and "File" tabs share the 140px sidebar; each tab exclusively shows its own blocks starting at palette grid row 5 (rows 1–4 are the tab buttons); `_pal_block!` computes row as `length(pal_items[]) + 5`.
+- **Dynamic block height** — `_block_height(block)` scales height as `max(BLOCK_H, PORT_HIT × 1.4 × (n_ports + 1))` so port hit-circles never overlap on multi-port blocks (e.g. Scope ×3).
+- **Scope windows** — `ScopeBlock` opens a dedicated `GLMakie.Screen` window on double-click; tracked per-block in `scope_screens` dict; `screen.window_open[]` guards against duplicate windows; old window is always replaced on re-run.
 - **JSON save/load** — `save_diagram`/`_reconstruct_block` live at module level in `canvas.jl`; the file format stores block type name, constructor params, name, position, and connections by block-name references.
 
 ---
 
-## GUI — COMPLETE (Phases 1–7)
+## GUI — COMPLETE (Phases 1–8)
 
 ### What `draw_diagram(diagram)` gives you
-Opening the GUI with `draw_diagram(d)` shows a 4-row window sized to 92 × 88% of the primary monitor:
+Opening the GUI with `draw_diagram(d)` shows a 3-row window sized to 92 × 88% of the primary monitor:
 
 | Area | Location | Purpose |
 |---|---|---|
-| Canvas | top-left (Auto) | Drag blocks, draw wires — blue border, light blue background |
-| Palette | top-middle (140px) | Tabbed: Blocks tab (Sources / Math) or File tab (save/load) |
-| Properties | top-right (200px) | Edit selected block parameters |
-| Toolbar | row 2 (auto height) | Run, tspan, dt, Clear |
-| Results | row 3 (28%) | Signal plots after Run |
-| Status bar | row 4 (auto height) | Current action / error messages |
+| Toolbar | row 1 (auto height) | Run, tspan, dt, Clear — always visible at top |
+| Canvas | row 2, left (Auto) | Drag blocks, draw wires — blue border, light blue background |
+| Palette | row 2, middle (140px) | 4 tabs: Sources / Math / Sinks / File |
+| Properties | row 2, right (200px) | Edit selected block parameters |
+| Status bar | row 3 (auto height) | Current action / error messages |
+| Scope windows | separate OS windows | One per ScopeBlock, opened on double-click |
 
 ### Interactions implemented
 | Action | How |
 |---|---|
-| Add block | Click block button in "Blocks" tab → placed at canvas centre |
+| Add block | Click block button in palette tab → placed at canvas centre |
 | Move block | Drag with left mouse; bezier wires follow live |
 | Select block | Left click → blue border + properties panel opens |
 | Edit params | Type in properties textbox, press Enter |
@@ -110,10 +144,11 @@ Opening the GUI with `draw_diagram(d)` shows a 4-row window sized to 92 × 88% o
 | Delete connection | Click wire → highlights orange → press Delete |
 | Cancel wire | Escape |
 | Delete block | Select → Delete key; removes block + all its connections |
-| Run simulation | Click ▶ Run; signal plots appear in Results panel |
+| Run simulation | Click ▶ Run; last result stored, status bar prompts scope double-click |
+| View scope signals | Double-click a ScopeBlock → dedicated plot window opens (no duplicates) |
 | Change tspan/dt | Edit toolbar textboxes before running |
-| Clear diagram | Click Clear button |
-| Zoom / pan canvas | Scroll to zoom; double-click to reset view |
+| Clear diagram | Click Clear button; closes all open scope windows |
+| Zoom / pan canvas | Scroll to zoom; double-click empty area to reset view |
 | Save diagram | File tab → set filename → Save |
 | Load diagram | File tab → set filename → Load (clears canvas first) |
 
@@ -123,10 +158,18 @@ Opening the GUI with `draw_diagram(d)` shows a 4-row window sized to 92 × 88% o
 
 ### Polish items (if time allows before thesis demo)
 - Block type label displayed inside the rectangle (e.g. "Gain" subtitle above block name)
+- Per-type block colors (`BLOCK_COLOR` dict keyed on block type) — makes canvas look more Simulink-like
+- Right-click to delete block or wire (currently Delete key only)
 - Port name labels on hover
 - Snap-to-grid for block positioning
 - Undo/redo stack
 - Rename validation (reject empty names, reject duplicate names before committing)
+
+### GUI dependency decision (permanent)
+The GUI stays on **GLMakie only** — no Gtk.jl or Cairo.jl.
+GLMakie covers all needed features (canvas, events, zoom/pan, plots, text input).
+The only trade-off is no native OS file dialog; the filename-in-textbox approach is adequate for thesis.
+The Gtk+Cairo architecture in `simulite_reference.md §3` is reference material only — not a migration target.
 
 ---
 
@@ -143,7 +186,8 @@ test/
                          remove_block!, get_execution_order,
                          error path coverage (DuplicateNameError,
                          PortNotFoundError, PortAlreadyConnectedError)
-  test_blocks.jl       — constructors and field defaults for all 7 blocks,
+  test_blocks.jl       — constructors and field defaults for all 8 blocks
+                         (including ScopeBlock: n_ports, title, evaluate! no-op),
                          evaluate! / commit_state! round-trips,
                          input_ports / output_ports counts
   test_runner.jl       — simulate() on: constant feed-forward,
@@ -172,3 +216,4 @@ test/
 - Expose `simulate_ode` in GUI as "continuous solver" toggle
 - Variable / mixed sample times (continuous + discrete in same diagram)
 - Code generation (export diagram as standalone Julia ODE script)
+- `TransferFnBlock` and `StateSpaceBlock` via `ControlSystems.jl` (deferred to avoid dependency during thesis)

@@ -5,6 +5,7 @@ include("model/blocks/api.jl")
 include("model/blocks/common.jl")
 include("model/blocks/sources.jl")
 include("model/blocks/math.jl")
+include("model/blocks/sinks.jl")
 include("model/diagram.jl")
 include("sim/compiler.jl")
 include("sim/runner.jl")
@@ -16,6 +17,7 @@ using .Diagram
 using .BlocksCommon
 using .BlocksSources
 using .BlocksMath
+using .BlocksSinks
 using .Compiler
 using .Runner
 using .Canvas
@@ -24,6 +26,7 @@ export BlockDiagram, SimConfig, SimResult, add_block!, connect!, disconnect!, re
 export DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError
 export input_ports, output_ports
 export ConstantBlock, StepBlock, SineBlock, GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock
+export ScopeBlock
 export simulate_ode
 export simulate
 export draw_diagram
