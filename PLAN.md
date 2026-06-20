@@ -12,7 +12,7 @@ Target: working GUI on top of a solid simulation engine.
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
 - ODE compiler path via ModelingToolkit (`simulate_ode`) — symbolic ODE system, adaptive solver
 - Two-phase execution: `evaluate!` (output current state) → inline propagation → `commit_state!` (advance state)
-- Topological sort (Kahn's algorithm) — blocks always executed in dependency order
+- Topological sort (Kahn's algorithm) — blocks always evaluated in dependency order
 - `simulate` returns `SimResult(t, data)` — time vector + named signal vectors
 
 ### Model layer — COMPLETE
@@ -38,7 +38,6 @@ Target: working GUI on top of a solid simulation engine.
 - No algebraic loop solving — cycles in the diagram error out
 - All signals are scalar `Float64` only
 - No subsystems / hierarchical diagrams
-- No save/load to file
 
 ---
 
@@ -63,8 +62,11 @@ src/
     compiler.jl             — ODE compiler via ModelingToolkit
     runner.jl               — fixed-step simulation loop
   gui/
-    canvas.jl               — full GUI: canvas, palette, properties,
-                              toolbar, results (draw_diagram)
+    canvas.jl               — full GUI: canvas, palette (tabbed),
+                              properties, toolbar, results,
+                              save/load (draw_diagram)
+test/
+  runtests.jl               — (planned) main test entry point
 ```
 
 ---
@@ -77,54 +79,89 @@ src/
 - **Two simulation backends** — runner (fixed-step, fast, used by GUI); compiler (MTK ODE, accurate, available as advanced mode).
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
 - **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
+- **Tabbed palette** — "Blocks" and "File" tabs share the same 140px sidebar column; tab switching clears and rebuilds the content area dynamically (same delete/recreate pattern as the Properties panel).
+- **JSON save/load** — `save_diagram`/`_reconstruct_block` live at module level in `canvas.jl`; the file format stores block type name, constructor params, name, position, and connections by block-name references.
 
 ---
 
-## GUI — COMPLETE (Phases 1–6)
+## GUI — COMPLETE (Phases 1–7)
 
 ### What `draw_diagram(diagram)` gives you
-Opening the GUI with `draw_diagram(d)` shows a 4-row window:
+Opening the GUI with `draw_diagram(d)` shows a 4-row window sized to 92 × 88% of the primary monitor:
 
 | Area | Location | Purpose |
 |---|---|---|
-| Canvas | top-left (55%) | Drag blocks, draw wires |
-| Palette | top-middle (130px) | Click to add new blocks |
-| Properties | top-right (190px) | Edit selected block parameters |
-| Toolbar | row 2 | Run, tspan, dt, Clear |
-| Results | row 3 (30%) | Signal plots after Run |
-| Status bar | row 4 | Current action / error messages |
+| Canvas | top-left (Auto) | Drag blocks, draw wires — blue border, light blue background |
+| Palette | top-middle (140px) | Tabbed: Blocks tab (Sources / Math) or File tab (save/load) |
+| Properties | top-right (200px) | Edit selected block parameters |
+| Toolbar | row 2 (auto height) | Run, tspan, dt, Clear |
+| Results | row 3 (28%) | Signal plots after Run |
+| Status bar | row 4 (auto height) | Current action / error messages |
 
 ### Interactions implemented
 | Action | How |
 |---|---|
-| Add block | Click palette button → placed at canvas center |
+| Add block | Click block button in "Blocks" tab → placed at canvas centre |
 | Move block | Drag with left mouse; bezier wires follow live |
 | Select block | Left click → blue border + properties panel opens |
 | Edit params | Type in properties textbox, press Enter |
 | Rename block | Edit "Name" field in properties → canvas label updates |
 | Draw connection | Click output port (red) → click input port (blue) |
+| Delete connection | Click wire → highlights orange → press Delete |
 | Cancel wire | Escape |
 | Delete block | Select → Delete key; removes block + all its connections |
 | Run simulation | Click ▶ Run; signal plots appear in Results panel |
 | Change tspan/dt | Edit toolbar textboxes before running |
 | Clear diagram | Click Clear button |
 | Zoom / pan canvas | Scroll to zoom; double-click to reset view |
+| Save diagram | File tab → set filename → Save |
+| Load diagram | File tab → set filename → Load (clears canvas first) |
 
 ---
 
 ## Remaining work
 
-### GUI Phase 7 — Save and load *(optional, post-demo)*
-- Serialize `BlockDiagram` to JSON (block types, params, positions, connections)
-- File open/save dialogs
-- Load reconstructs Julia objects and redraws canvas
-
-### Polish items (if time allows)
-- Block type label displayed inside the rectangle (e.g. "Gain" above the name)
+### Polish items (if time allows before thesis demo)
+- Block type label displayed inside the rectangle (e.g. "Gain" subtitle above block name)
 - Port name labels on hover
 - Snap-to-grid for block positioning
 - Undo/redo stack
 - Rename validation (reject empty names, reject duplicate names before committing)
+
+---
+
+## Testing infrastructure *(required for Julia General Registry)*
+
+Julia's General Registry requires a package to have a passing `test/runtests.jl` and proper `[compat]` bounds. Planned test structure:
+
+```
+test/
+  runtests.jl          — @testset "SimuLite" includes all sub-suites
+  test_types.jl        — Port, Connection, SimConfig, BlockDiagram,
+                         SimResult, DiagramError subtypes
+  test_diagram.jl      — add_block!, connect!, disconnect!,
+                         remove_block!, get_execution_order,
+                         error path coverage (DuplicateNameError,
+                         PortNotFoundError, PortAlreadyConnectedError)
+  test_blocks.jl       — constructors and field defaults for all 7 blocks,
+                         evaluate! / commit_state! round-trips,
+                         input_ports / output_ports counts
+  test_runner.jl       — simulate() on: constant feed-forward,
+                         gain chain, step response, integrator (ramp),
+                         unit delay (one-step shift)
+  test_compiler.jl     — simulate_ode() on integrator block (ramp),
+                         compare result with runner to within tolerance
+  test_io.jl           — save_diagram / load round-trip:
+                         same block count, params, and connections
+                         after save → new diagram → load
+```
+
+### Additional registry checklist
+- `[compat]` entries for all direct deps (GLMakie, JSON3, DifferentialEquations, ModelingToolkit)
+- Public API docstrings on `draw_diagram`, `simulate`, `simulate_ode`, all block constructors, `add_block!`, `connect!`, `disconnect!`, `remove_block!`
+- Semantic versioning: bump to `0.2.0` once tests pass
+- `LICENSE` file (MIT recommended for Julia ecosystem packages)
+- `README.md` with install instructions and a minimal usage example
 
 ---
 

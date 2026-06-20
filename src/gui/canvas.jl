@@ -3,10 +3,11 @@ module Canvas
 using GLMakie
 using ..Types
 import ..BlocksAPI: input_ports, output_ports
-import ..Diagram: connect!, add_block!, remove_block!
+import ..Diagram: connect!, add_block!, remove_block!, disconnect!
 import ..BlocksSources: ConstantBlock, StepBlock, SineBlock
 import ..BlocksMath: GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock
 import ..Runner: simulate
+using JSON3
 
 export draw_diagram
 
@@ -74,6 +75,18 @@ function _hit_port(port_pos, pos)
         dx^2 + dy^2 < PORT_HIT^2 && return key
     end
     return nothing
+end
+
+function _hit_connection(conn, port_pos, pos; tol = 0.12)
+    src_obs = port_pos[(conn.src_block, conn.src_port)]
+    dst_obs = port_pos[(conn.dst_block, conn.dst_port)]
+    p0, p1  = src_obs[], dst_obs[]
+    xs, ys  = _bezier(p0[1], p0[2], p1[1], p1[2])
+    px, py  = Float64(pos[1]), Float64(pos[2])
+    for i in eachindex(xs)
+        (xs[i] - px)^2 + (ys[i] - py)^2 < tol^2 && return true
+    end
+    return false
 end
 
 # ── Block and connection draw helpers ─────────────────────────────────────────
@@ -172,6 +185,81 @@ function _delete_block!(ax, diagram, block,
     delete!(block_strokes, block)
 end
 
+# ── Save / Load ───────────────────────────────────────────────────────────────
+
+function save_diagram(diagram::BlockDiagram, path::String)
+    blocks_data = map(diagram.blocks) do b
+        params = if b isa ConstantBlock
+            Dict("value" => b.value)
+        elseif b isa StepBlock
+            Dict("step_time" => b.step_time, "before" => b.before, "after" => b.after)
+        elseif b isa SineBlock
+            Dict("amplitude" => b.amplitude, "frequency" => b.frequency,
+                 "phase"     => b.phase,     "offset"    => b.offset)
+        elseif b isa GainBlock
+            Dict("k" => b.k)
+        elseif b isa SumBlock
+            Dict("signs" => b.signs)
+        elseif b isa IntegratorBlock
+            Dict("state" => b.state)
+        elseif b isa UnitDelayBlock
+            Dict("state" => b.state)
+        else
+            Dict{String,Any}()
+        end
+        Dict("type"     => string(nameof(typeof(b))),
+             "name"     => b.name,
+             "position" => [b.position[1], b.position[2]],
+             "params"   => params)
+    end
+
+    conns_data = map(diagram.connections) do c
+        Dict("src"      => c.src_block.name,
+             "src_port" => string(c.src_port),
+             "dst"      => c.dst_block.name,
+             "dst_port" => string(c.dst_port))
+    end
+
+    data = Dict(
+        "config"      => Dict("tspan" => [diagram.config.tspan[1], diagram.config.tspan[2]],
+                              "dt"    => diagram.config.dt),
+        "blocks"      => blocks_data,
+        "connections" => conns_data)
+
+    open(path, "w") do io; JSON3.write(io, data); end
+end
+
+function _reconstruct_block(type_name::String, name::String, position, params)
+    pf(k, d) = Float64(get(params, k, d))
+    ps(k, d) = String(get(params, k, d))
+
+    b = if type_name == "ConstantBlock"
+        ConstantBlock(pf(:value, 0.0))
+    elseif type_name == "StepBlock"
+        StepBlock(; step_time = pf(:step_time, 1.0),
+                    before    = pf(:before, 0.0),
+                    after     = pf(:after, 1.0))
+    elseif type_name == "SineBlock"
+        SineBlock(; amplitude = pf(:amplitude, 1.0),
+                    frequency = pf(:frequency, 1.0),
+                    phase     = pf(:phase, 0.0),
+                    offset    = pf(:offset, 0.0))
+    elseif type_name == "GainBlock"
+        GainBlock(pf(:k, 1.0))
+    elseif type_name == "SumBlock"
+        SumBlock(ps(:signs, "++"))
+    elseif type_name == "IntegratorBlock"
+        IntegratorBlock(pf(:state, 0.0))
+    elseif type_name == "UnitDelayBlock"
+        UnitDelayBlock(pf(:state, 0.0))
+    else
+        error("Unknown block type in file: $type_name")
+    end
+    b.name     = name
+    b.position = (Float64(position[1]), Float64(position[2]))
+    return b
+end
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 """
@@ -194,23 +282,32 @@ Interactions:
 - **Clear** — remove all blocks and connections
 """
 function draw_diagram(diagram::BlockDiagram)
-    fig = Figure(size = (1500, 860))
+    _res = try; GLMakie.primary_resolution(); catch; (1600, 900); end
+    fig = Figure(size = (round(Int, _res[1] * 0.92), round(Int, _res[2] * 0.88)))
 
     # ── Row 1: canvas | palette | properties ─────────────────────────────────
-    ax = Axis(fig[1, 1], title = "Diagram")
+    ax = Axis(fig[1, 1];
+        leftspinecolor   = RGBf(0.30, 0.50, 0.78),
+        rightspinecolor  = RGBf(0.30, 0.50, 0.78),
+        bottomspinecolor = RGBf(0.30, 0.50, 0.78),
+        topspinecolor    = RGBf(0.30, 0.50, 0.78),
+        spinewidth       = 2,
+        backgroundcolor  = RGBf(0.97, 0.98, 1.00))
     hidedecorations!(ax)
-    hidespines!(ax)
     limits!(ax, -2.0, 14.0, -6.0, 6.0)
 
-    palette_grid = GridLayout(fig[1, 2])
-    Label(palette_grid[1, 1], "Add Block"; fontsize = 13, halign = :center)
+    palette_grid   = GridLayout(fig[1, 2])
+    btn_tab_blocks = Button(palette_grid[1, 1]; label = "Blocks", tellwidth = true)
+    btn_tab_file   = Button(palette_grid[2, 1]; label = "File",   tellwidth = true)
 
     props_grid = GridLayout(fig[1, 3])
     Label(props_grid[1, 1:2], "Properties"; fontsize = 13, halign = :center)
 
-    colsize!(fig.layout, 1, Relative(0.55))
-    colsize!(fig.layout, 2, Fixed(130))
-    colsize!(fig.layout, 3, Fixed(190))
+    colsize!(fig.layout, 1, Auto())      # canvas: fills space left by sidebars
+    colsize!(fig.layout, 2, Fixed(140))  # palette
+    colsize!(fig.layout, 3, Fixed(200))  # properties
+
+    rowsize!(fig.layout, 1, Relative(0.60))  # canvas: 60% of window height
 
     # ── Row 2: simulation toolbar (full width) ────────────────────────────────
     toolbar = GridLayout(fig[2, 1:3])
@@ -219,13 +316,13 @@ function draw_diagram(diagram::BlockDiagram)
     btn_run = Button(toolbar[1, 1]; label = "▶  Run")
     Label(toolbar[1, 2], "  t:";  tellwidth = false)
     tb_tstart = Textbox(toolbar[1, 3];
-        displayed_string = string(diagram.config.tspan[1]), width = 55)
+        displayed_string = string(diagram.config.tspan[1]), width = 60)
     Label(toolbar[1, 4], "→";  tellwidth = false)
     tb_tend   = Textbox(toolbar[1, 5];
-        displayed_string = string(diagram.config.tspan[2]), width = 55)
+        displayed_string = string(diagram.config.tspan[2]), width = 60)
     Label(toolbar[1, 6], "  dt:"; tellwidth = false)
     tb_dt     = Textbox(toolbar[1, 7];
-        displayed_string = string(diagram.config.dt), width = 55)
+        displayed_string = string(diagram.config.dt), width = 60)
     btn_clear = Button(toolbar[1, 8]; label = "Clear")
 
     # ── Row 3: results axis (full width) ─────────────────────────────────────
@@ -233,7 +330,7 @@ function draw_diagram(diagram::BlockDiagram)
         title  = "Results",
         xlabel = "t",
         ylabel = "signal")
-    rowsize!(fig.layout, 3, Relative(0.30))
+    rowsize!(fig.layout, 3, Relative(0.28))  # results: 28% of window height
 
     # ── Row 4: status bar ─────────────────────────────────────────────────────
     status = Observable("Build a diagram, then click ▶ Run")
@@ -243,12 +340,13 @@ function draw_diagram(diagram::BlockDiagram)
     deregister_interaction!(ax, :rectanglezoom)
 
     # ── State dicts ───────────────────────────────────────────────────────────
-    block_centers = Dict{AbstractBlock, Observable{Point2f}}()
-    block_strokes = Dict{AbstractBlock, Observable{Symbol}}()
-    port_pos      = Dict{Tuple{Any, Symbol}, Observable{Point2f}}()
-    port_type     = Dict{Tuple{Any, Symbol}, Symbol}()
-    block_visuals = Dict{AbstractBlock, BlockVisual}()
-    conn_visuals  = Dict{Connection,    ConnVisual}()
+    block_centers  = Dict{AbstractBlock, Observable{Point2f}}()
+    block_strokes  = Dict{AbstractBlock, Observable{Symbol}}()
+    port_pos       = Dict{Tuple{Any, Symbol}, Observable{Point2f}}()
+    port_type      = Dict{Tuple{Any, Symbol}, Symbol}()
+    block_visuals  = Dict{AbstractBlock, BlockVisual}()
+    conn_visuals   = Dict{Connection,    ConnVisual}()
+    results_legend = Ref{Any}(nothing)
 
     # ── Draw existing diagram ─────────────────────────────────────────────────
     for block in diagram.blocks
@@ -345,9 +443,32 @@ function draw_diagram(diagram::BlockDiagram)
     end
 
     # ── Interaction state ─────────────────────────────────────────────────────
-    wire_src    = Ref{Union{Nothing, Tuple{Any, Symbol}}}(nothing)
-    selected    = Ref{Union{Nothing, AbstractBlock}}(nothing)
-    drag_offset = Ref((0.0, 0.0))
+    wire_src      = Ref{Union{Nothing, Tuple{Any, Symbol}}}(nothing)
+    selected      = Ref{Union{Nothing, AbstractBlock}}(nothing)
+    selected_conn = Ref{Union{Nothing, Connection}}(nothing)
+    drag_offset   = Ref((0.0, 0.0))
+
+    function _clear_all!()
+        _deselect_conn!()
+        if selected[] !== nothing
+            selected[] = nothing
+            clear_props!()
+        end
+        if wire_active[]
+            wire_active[] = false
+            wire_src[]    = nothing
+        end
+        for block in copy(diagram.blocks)
+            _delete_block!(ax, diagram, block,
+                block_centers, block_strokes, port_pos, port_type,
+                block_visuals, conn_visuals)
+        end
+        empty!(results_ax)
+        if results_legend[] !== nothing
+            delete!(results_legend[])
+            results_legend[] = nothing
+        end
+    end
 
     function _cancel_wire!()
         wire_active[] = false
@@ -355,7 +476,19 @@ function draw_diagram(diagram::BlockDiagram)
         status[] = "Wire cancelled"
     end
 
+    function _deselect_conn!()
+        if selected_conn[] !== nothing
+            cv = get(conn_visuals, selected_conn[], nothing)
+            if cv !== nothing
+                cv.curve.color[] = :black
+                cv.arrow.color[] = :black
+            end
+            selected_conn[] = nothing
+        end
+    end
+
     function _deselect!()
+        _deselect_conn!()
         if selected[] !== nothing
             block_strokes[selected[]][] = :black
             selected[] = nothing
@@ -415,6 +548,17 @@ function draw_diagram(diagram::BlockDiagram)
                             break
                         end
                     end
+                    if selected[] === nothing
+                        for (conn, cv) in conn_visuals
+                            if _hit_connection(conn, port_pos, pos)
+                                selected_conn[]    = conn
+                                cv.curve.color[]   = :orange
+                                cv.arrow.color[]   = :orange
+                                status[] = "Connection selected — press Delete to remove"
+                                break
+                            end
+                        end
+                    end
                 end
             end
 
@@ -436,22 +580,44 @@ function draw_diagram(diagram::BlockDiagram)
         ev.action == Keyboard.press || return
         if ev.key == Keyboard.escape
             wire_active[] ? _cancel_wire!() : _deselect!()
-        elseif ev.key == Keyboard.delete && selected[] !== nothing && !wire_active[]
-            block = selected[]
-            selected[] = nothing
-            clear_props!()
-            _delete_block!(ax, diagram, block,
-                block_centers, block_strokes, port_pos, port_type,
-                block_visuals, conn_visuals)
-            status[] = "Block deleted"
+        elseif ev.key == Keyboard.delete && !wire_active[]
+            if selected_conn[] !== nothing
+                conn = selected_conn[]
+                _deselect_conn!()
+                cv = conn_visuals[conn]
+                delete!(ax, cv.curve)
+                delete!(ax, cv.arrow)
+                delete!(conn_visuals, conn)
+                disconnect!(diagram, conn.src_block, conn.src_port,
+                            conn.dst_block, conn.dst_port)
+                status[] = "Connection deleted"
+            elseif selected[] !== nothing
+                block = selected[]
+                selected[] = nothing
+                clear_props!()
+                _delete_block!(ax, diagram, block,
+                    block_centers, block_strokes, port_pos, port_type,
+                    block_visuals, conn_visuals)
+                status[] = "Block deleted"
+            end
         end
     end
 
-    # ── Palette buttons ───────────────────────────────────────────────────────
-    palette_items = [
-        ("Constant",    () -> ConstantBlock(0.0)),
-        ("Step",        () -> StepBlock()),
-        ("Sine",        () -> SineBlock()),
+    # ── Palette: tabbed content ───────────────────────────────────────────────
+    pal_items    = Ref{Vector{Any}}(Any[])
+    filename_ref = Ref{String}("diagram.json")
+
+    function clear_pal!()
+        for item in pal_items[]; delete!(item); end
+        pal_items[] = Any[]
+    end
+
+    sources_pal = [
+        ("Constant",  () -> ConstantBlock(0.0)),
+        ("Step",      () -> StepBlock()),
+        ("Sine",      () -> SineBlock()),
+    ]
+    math_pal = [
         ("Gain",        () -> GainBlock(1.0)),
         ("Sum  ++",     () -> SumBlock("++")),
         ("Sum  +-",     () -> SumBlock("+-")),
@@ -459,25 +625,114 @@ function draw_diagram(diagram::BlockDiagram)
         ("Unit Delay",  () -> UnitDelayBlock(0.0)),
     ]
 
-    for (i, (lbl, factory)) in enumerate(palette_items)
-        btn = Button(palette_grid[i + 1, 1]; label = lbl, tellwidth = true)
-        on(btn.clicks) do _
-            block = factory()
-            r  = ax.finallimits[]
-            block.position = (Float64(r.origin[1] + r.widths[1] / 2),
-                              Float64(r.origin[2] + r.widths[2] / 2))
-            try
-                add_block!(diagram, block)
-            catch e
-                status[] = e isa DiagramError ? sprint(showerror, e) : "Error — see REPL"
-                e isa DiagramError || rethrow(e)
-                return
+    function show_blocks_tab!()
+        clear_pal!()
+        btn_tab_blocks.buttoncolor[] = RGBf(0.30, 0.50, 0.78)
+        btn_tab_file.buttoncolor[]   = RGBf(0.85, 0.85, 0.85)
+        row = Ref(3)
+
+        function pal_cat!(text)
+            lbl = Label(palette_grid[row[], 1], text;
+                fontsize = 11, halign = :center, color = :gray50)
+            push!(pal_items[], lbl)
+            row[] += 1
+        end
+
+        function pal_block!(lbl_text, factory)
+            btn = Button(palette_grid[row[], 1]; label = lbl_text, tellwidth = true)
+            on(btn.clicks) do _
+                block = factory()
+                r = ax.finallimits[]
+                block.position = (Float64(r.origin[1] + r.widths[1] / 2),
+                                  Float64(r.origin[2] + r.widths[2] / 2))
+                try
+                    add_block!(diagram, block)
+                catch e
+                    status[] = e isa DiagramError ? sprint(showerror, e) : "Error — see REPL"
+                    e isa DiagramError || rethrow(e)
+                    return
+                end
+                block_visuals[block] = _setup_block!(ax, block,
+                    block_centers, block_strokes, port_pos, port_type)
+                status[] = "Added $(block.name) — drag to position"
             end
-            block_visuals[block] = _setup_block!(ax, block,
-                block_centers, block_strokes, port_pos, port_type)
-            status[] = "Added $(block.name) — drag to position"
+            push!(pal_items[], btn)
+            row[] += 1
+        end
+
+        pal_cat!("─ Sources ─")
+        for (lbl, factory) in sources_pal; pal_block!(lbl, factory); end
+        pal_cat!("─ Math ─")
+        for (lbl, factory) in math_pal;    pal_block!(lbl, factory); end
+    end
+
+    function show_file_tab!()
+        clear_pal!()
+        btn_tab_blocks.buttoncolor[] = RGBf(0.85, 0.85, 0.85)
+        btn_tab_file.buttoncolor[]   = RGBf(0.30, 0.50, 0.78)
+        row = Ref(3)
+
+        function fadd!(w); push!(pal_items[], w); row[] += 1; w; end
+
+        fadd!(Label(palette_grid[row[], 1], "Filename:";
+            fontsize = 11, halign = :left))
+        tb = fadd!(Textbox(palette_grid[row[], 1];
+            displayed_string = filename_ref[], tellwidth = true, fontsize = 11))
+        on(tb.stored_string) do s; s === nothing || (filename_ref[] = s); end
+
+        btn_save = fadd!(Button(palette_grid[row[], 1]; label = "Save", tellwidth = true))
+        on(btn_save.clicks) do _
+            path = filename_ref[]
+            isempty(path) && (path = "diagram.json")
+            try
+                save_diagram(diagram, path)
+                status[] = "Saved to $path"
+            catch e
+                status[] = "Save failed: $(sprint(showerror, e))"
+            end
+        end
+
+        btn_load = fadd!(Button(palette_grid[row[], 1]; label = "Load", tellwidth = true))
+        on(btn_load.clicks) do _
+            path = filename_ref[]
+            isempty(path) && (path = "diagram.json")
+            isfile(path) || (status[] = "File not found: $path"; return)
+            try
+                data = JSON3.read(read(path, String))
+                _clear_all!()
+                cfg = data["config"]
+                diagram.config.tspan = (Float64(cfg["tspan"][1]), Float64(cfg["tspan"][2]))
+                diagram.config.dt    = Float64(cfg["dt"])
+                name_to_block = Dict{String, AbstractBlock}()
+                for b_data in data["blocks"]
+                    b = _reconstruct_block(String(b_data["type"]),
+                                           String(b_data["name"]),
+                                           b_data["position"],
+                                           b_data["params"])
+                    add_block!(diagram, b)
+                    block_visuals[b] = _setup_block!(ax, b,
+                        block_centers, block_strokes, port_pos, port_type)
+                    name_to_block[b.name] = b
+                end
+                for c_data in data["connections"]
+                    src = name_to_block[String(c_data["src"])]
+                    dst = name_to_block[String(c_data["dst"])]
+                    connect!(diagram, src, Symbol(c_data["src_port"]),
+                                      dst, Symbol(c_data["dst_port"]))
+                    conn = diagram.connections[end]
+                    conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+                end
+                status[] = "Loaded from $path — $(length(diagram.blocks)) blocks, $(length(diagram.connections)) connections"
+            catch e
+                status[] = "Load failed: $(sprint(showerror, e))"
+                @warn "Load error" exception = (e, catch_backtrace())
+            end
         end
     end
+
+    on(btn_tab_blocks.clicks) do _; show_blocks_tab!(); end
+    on(btn_tab_file.clicks)   do _; show_file_tab!();   end
+    show_blocks_tab!()
 
     # ── Toolbar: SimConfig textboxes ──────────────────────────────────────────
     on(tb_tstart.stored_string) do s
@@ -494,8 +749,6 @@ function draw_diagram(diagram::BlockDiagram)
     end
 
     # ── Toolbar: Run button ───────────────────────────────────────────────────
-    results_legend = Ref{Any}(nothing)
-
     on(btn_run.clicks) do _
         try
             result = simulate(diagram)
@@ -521,21 +774,7 @@ function draw_diagram(diagram::BlockDiagram)
 
     # ── Toolbar: Clear button ─────────────────────────────────────────────────
     on(btn_clear.clicks) do _
-        blocks_copy = copy(diagram.blocks)
-        if selected[] !== nothing
-            selected[] = nothing
-            clear_props!()
-        end
-        for block in blocks_copy
-            _delete_block!(ax, diagram, block,
-                block_centers, block_strokes, port_pos, port_type,
-                block_visuals, conn_visuals)
-        end
-        empty!(results_ax)
-        if results_legend[] !== nothing
-            delete!(results_legend[])
-            results_legend[] = nothing
-        end
+        _clear_all!()
         status[] = "Diagram cleared"
     end
 
