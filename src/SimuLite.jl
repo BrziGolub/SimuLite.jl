@@ -25,8 +25,11 @@ using .Canvas
 export BlockDiagram, SimConfig, SimResult, add_block!, connect!, disconnect!, remove_block!
 export DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError
 export input_ports, output_ports
-export ConstantBlock, StepBlock, SineBlock, GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock
-export ScopeBlock
+export ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
+export GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
+       ProductBlock, SaturationBlock, AbsBlock,
+       DerivativeBlock, PIDBlock, LookupTable1DBlock
+export ScopeBlock, WorkspaceBlock, TerminatorBlock
 export simulate_ode
 export simulate
 export draw_diagram

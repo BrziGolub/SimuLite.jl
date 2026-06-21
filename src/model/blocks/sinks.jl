@@ -5,7 +5,7 @@ using ..BlocksCommon
 
 import ..BlocksAPI: evaluate!
 
-export ScopeBlock
+export ScopeBlock, WorkspaceBlock, TerminatorBlock
 
 mutable struct ScopeBlock <: AbstractBlock
     base     :: BlockBase
@@ -29,5 +29,50 @@ function ScopeBlock(; title="Scope", n_ports=1,
 end
 
 evaluate!(::ScopeBlock, ::Any, ::Any) = nothing  # data read from SimResult via upstream connections
+
+# ------------------------------------------
+
+mutable struct WorkspaceBlock <: AbstractBlock
+    base     :: BlockBase
+    name     :: String
+    position :: Tuple{Float64, Float64}
+end
+
+"""
+    WorkspaceBlock(; name, position)
+
+Pass-through sink. Copies its input to its output so the runner logs the
+signal under `name.out` in `SimResult.data`. The block name acts as the
+variable name in the workspace.
+"""
+function WorkspaceBlock(; name="ws_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase([:in], [:out])
+    WorkspaceBlock(base, name, position)
+end
+
+function evaluate!(b::WorkspaceBlock, _t, _dt)
+    b.base.outputs[:out].value = b.base.inputs[:in].value
+end
+
+# ------------------------------------------
+
+mutable struct TerminatorBlock <: AbstractBlock
+    base     :: BlockBase
+    name     :: String
+    position :: Tuple{Float64, Float64}
+end
+
+"""
+    TerminatorBlock(; name, position)
+
+Sink with one input and no outputs. Use it to cleanly cap an unconnected
+output port without the diagram raising a missing-connection warning.
+"""
+function TerminatorBlock(; name="term_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase([:in], Symbol[])
+    TerminatorBlock(base, name, position)
+end
+
+evaluate!(::TerminatorBlock, ::Any, ::Any) = nothing
 
 end

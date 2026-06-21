@@ -5,7 +5,7 @@ using ..BlocksCommon
 
 import ..BlocksAPI: evaluate!
 
-export ConstantBlock, StepBlock, SineBlock
+export ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
 
 # ------------------------------------------
 
@@ -77,6 +77,45 @@ end
 function evaluate!(b::SineBlock, t, _dt)
     b.base.outputs[:out].value =
         b.amplitude * sin(2π * b.frequency * t + b.phase) + b.offset
+end
+
+# ------------------------------------------
+
+mutable struct RampBlock <: AbstractBlock
+    base       :: BlockBase
+    slope      :: Float64
+    start_time :: Float64
+    bias       :: Float64
+    name       :: String
+    position   :: Tuple{Float64, Float64}
+end
+
+function RampBlock(; slope=1.0, start_time=0.0, bias=0.0,
+                     name="ramp_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase(Symbol[], [:out])
+    RampBlock(base, slope, start_time, bias, name, position)
+end
+
+function evaluate!(b::RampBlock, t, _dt)
+    b.base.outputs[:out].value =
+        b.bias + (t >= b.start_time ? b.slope * (t - b.start_time) : 0.0)
+end
+
+# ------------------------------------------
+
+mutable struct ClockBlock <: AbstractBlock
+    base     :: BlockBase
+    name     :: String
+    position :: Tuple{Float64, Float64}
+end
+
+function ClockBlock(; name="clock_$(_next_id())", position=(0.0, 0.0))
+    base = BlockBase(Symbol[], [:out])
+    ClockBlock(base, name, position)
+end
+
+function evaluate!(b::ClockBlock, t, _dt)
+    b.base.outputs[:out].value = t
 end
 
 end

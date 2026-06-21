@@ -4,9 +4,11 @@ using GLMakie
 using ..Types
 import ..BlocksAPI: input_ports, output_ports
 import ..Diagram: connect!, add_block!, remove_block!, disconnect!
-import ..BlocksSources: ConstantBlock, StepBlock, SineBlock
-import ..BlocksMath: GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock
-import ..BlocksSinks: ScopeBlock
+import ..BlocksSources: ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
+import ..BlocksMath: GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
+                    ProductBlock, SaturationBlock, AbsBlock,
+                    DerivativeBlock, PIDBlock, LookupTable1DBlock
+import ..BlocksSinks: ScopeBlock, WorkspaceBlock, TerminatorBlock
 import ..Runner: simulate
 using JSON3
 
@@ -216,6 +218,27 @@ function save_diagram(diagram::BlockDiagram, path::String)
             Dict("state" => b.state)
         elseif b isa ScopeBlock
             Dict("title" => b.title, "n_ports" => b.n_ports)
+        elseif b isa RampBlock
+            Dict("slope" => b.slope, "start_time" => b.start_time, "bias" => b.bias)
+        elseif b isa ClockBlock
+            Dict{String,Any}()
+        elseif b isa ProductBlock
+            Dict("ops" => [string(op) for op in b.ops])
+        elseif b isa SaturationBlock
+            Dict("lower" => b.lower, "upper" => b.upper)
+        elseif b isa AbsBlock
+            Dict{String,Any}()
+        elseif b isa DerivativeBlock
+            Dict("N" => b.N)
+        elseif b isa PIDBlock
+            Dict("Kp" => b.Kp, "Ki" => b.Ki, "Kd" => b.Kd, "N" => b.N,
+                 "out_min" => b.out_min, "out_max" => b.out_max)
+        elseif b isa LookupTable1DBlock
+            Dict("bp" => b.bp, "vals" => b.vals)
+        elseif b isa WorkspaceBlock
+            Dict{String,Any}()
+        elseif b isa TerminatorBlock
+            Dict{String,Any}()
         else
             Dict{String,Any}()
         end
@@ -267,6 +290,36 @@ function _reconstruct_block(type_name::String, name::String, position, params)
     elseif type_name == "ScopeBlock"
         ScopeBlock(; title   = ps(:title, "Scope"),
                      n_ports = Int(get(params, :n_ports, 1)))
+    elseif type_name == "RampBlock"
+        RampBlock(; slope      = pf(:slope, 1.0),
+                    start_time = pf(:start_time, 0.0),
+                    bias       = pf(:bias, 0.0))
+    elseif type_name == "ClockBlock"
+        ClockBlock()
+    elseif type_name == "ProductBlock"
+        ops_raw = get(params, :ops, ["mul", "mul"])
+        ProductBlock([Symbol(s) for s in ops_raw])
+    elseif type_name == "SaturationBlock"
+        SaturationBlock(; lower = pf(:lower, -1.0), upper = pf(:upper, 1.0))
+    elseif type_name == "AbsBlock"
+        AbsBlock()
+    elseif type_name == "DerivativeBlock"
+        DerivativeBlock(; N = pf(:N, 100.0))
+    elseif type_name == "PIDBlock"
+        PIDBlock(; Kp      = pf(:Kp, 1.0),
+                   Ki      = pf(:Ki, 0.1),
+                   Kd      = pf(:Kd, 0.0),
+                   N       = pf(:N, 100.0),
+                   out_min = pf(:out_min, -Inf),
+                   out_max = pf(:out_max,  Inf))
+    elseif type_name == "LookupTable1DBlock"
+        bp   = Float64[Float64(x) for x in get(params, :bp,   [0.0, 1.0])]
+        vals = Float64[Float64(x) for x in get(params, :vals, [0.0, 1.0])]
+        LookupTable1DBlock(bp, vals)
+    elseif type_name == "WorkspaceBlock"
+        WorkspaceBlock()
+    elseif type_name == "TerminatorBlock"
+        TerminatorBlock()
     else
         error("Unknown block type in file: $type_name")
     end
@@ -323,37 +376,158 @@ function _open_scope_window!(scope_block, result, diagram, scope_screens)
     scope_screens[scope_block] = screen
 end
 
+# ── Properties window ─────────────────────────────────────────────────────────
+
+function _open_props_window!(block, block_visuals, prop_screens)
+    if haskey(prop_screens, block)
+        prev = prop_screens[block]
+        try; prev.window_open[] && close(prev); catch _; end
+        delete!(prop_screens, block)
+    end
+
+    bv  = block_visuals[block]
+    fig = Figure(size = (300, 380))
+    g   = GridLayout(fig[1, 1])
+
+    Label(g[1, 1:2], string(nameof(typeof(block)));
+        fontsize = 14, halign = :center, font = :bold)
+
+    row = Ref(2)
+
+    function add_field!(fname, value, on_commit)
+        r = row[]
+        Label(g[r, 1], fname * ":"; halign = :right, fontsize = 12)
+        tb = Textbox(g[r, 2]; displayed_string = value, tellwidth = false, fontsize = 12)
+        on(tb.stored_string) do s
+            s === nothing && return
+            try; on_commit(s); catch _; end
+        end
+        row[] += 1
+    end
+
+    function add_info!(text)
+        Label(g[row[], 1:2], text; fontsize = 11, halign = :left, color = :gray50)
+        row[] += 1
+    end
+
+    add_field!("Name", block.name, s -> begin
+        block.name = s
+        bv.label.text[] = [s]
+    end)
+
+    if block isa ConstantBlock
+        add_field!("Value", string(block.value),
+            s -> block.value = parse(Float64, s))
+    elseif block isa StepBlock
+        add_field!("Step time", string(block.step_time),
+            s -> block.step_time = parse(Float64, s))
+        add_field!("Before",    string(block.before),
+            s -> block.before    = parse(Float64, s))
+        add_field!("After",     string(block.after),
+            s -> block.after     = parse(Float64, s))
+    elseif block isa SineBlock
+        add_field!("Amplitude", string(block.amplitude),
+            s -> block.amplitude = parse(Float64, s))
+        add_field!("Frequency", string(block.frequency),
+            s -> block.frequency = parse(Float64, s))
+        add_field!("Phase",     string(block.phase),
+            s -> block.phase     = parse(Float64, s))
+        add_field!("Offset",    string(block.offset),
+            s -> block.offset    = parse(Float64, s))
+    elseif block isa RampBlock
+        add_field!("Slope",      string(block.slope),
+            s -> block.slope      = parse(Float64, s))
+        add_field!("Start time", string(block.start_time),
+            s -> block.start_time = parse(Float64, s))
+        add_field!("Bias",       string(block.bias),
+            s -> block.bias       = parse(Float64, s))
+    elseif block isa GainBlock
+        add_field!("k", string(block.k),
+            s -> block.k = parse(Float64, s))
+    elseif block isa SumBlock
+        add_field!("Signs", block.signs, s -> block.signs = s)
+    elseif block isa IntegratorBlock
+        add_field!("Init state", string(block.state), s -> begin
+            v = parse(Float64, s)
+            block.state      = v
+            block.next_state = v
+        end)
+    elseif block isa UnitDelayBlock
+        add_field!("Init state", string(block.state), s -> begin
+            v = parse(Float64, s)
+            block.state      = v
+            block.next_state = v
+        end)
+    elseif block isa SaturationBlock
+        add_field!("Lower", string(block.lower),
+            s -> block.lower = parse(Float64, s))
+        add_field!("Upper", string(block.upper),
+            s -> block.upper = parse(Float64, s))
+    elseif block isa DerivativeBlock
+        add_field!("N (bandwidth)", string(block.N),
+            s -> block.N = parse(Float64, s))
+    elseif block isa PIDBlock
+        add_field!("Kp",      string(block.Kp),
+            s -> block.Kp      = parse(Float64, s))
+        add_field!("Ki",      string(block.Ki),
+            s -> block.Ki      = parse(Float64, s))
+        add_field!("Kd",      string(block.Kd),
+            s -> block.Kd      = parse(Float64, s))
+        add_field!("N",       string(block.N),
+            s -> block.N       = parse(Float64, s))
+        add_field!("Out min", string(block.out_min),
+            s -> block.out_min = parse(Float64, s))
+        add_field!("Out max", string(block.out_max),
+            s -> block.out_max = parse(Float64, s))
+    elseif block isa ProductBlock
+        ops_str = join(block.ops, ", ")
+        add_info!("Ports: $(length(block.ops))  ops: $ops_str")
+    elseif block isa LookupTable1DBlock
+        add_info!("$(length(block.bp))-pt table (edit breakpoints in code)")
+    end
+
+    screen = GLMakie.Screen(title = "Properties — $(block.name)")
+    display(screen, fig)
+    prop_screens[block] = screen
+end
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 """
     draw_diagram(diagram) -> Figure
 
 Opens the SimuLite GUI window. Layout:
-- Left:   block diagram canvas
-- Middle: block palette
-- Right:  properties panel (updates when a block is selected)
-- Bottom: simulation toolbar + results plots
+- Left:  block palette (tabbed: Sources / Math / Sinks / File)
+- Right: block diagram canvas
 
 Interactions:
-- **Palette** — click to add a block at canvas center
+- **Palette** — click to add a block at canvas centre
 - **Drag** a block to reposition it
 - **Output port** (red) → **Input port** (blue) to wire
-- **Select block** → edit parameters in Properties panel (Enter to apply)
+- **Single-click block** — select (blue border); Delete to remove
+- **Double-click block** — open floating Properties window to edit parameters
+- **Double-click Scope** — open result plot window (run first)
 - **Escape** — cancel wire / deselect
-- **Delete** — remove selected block and its connections
 - **▶ Run** — simulate and show signal plots
-- **Clear** — remove all blocks and connections
+- **Clear** — remove all blocks, connections, and open windows
 """
-function draw_diagram(diagram::BlockDiagram)
+function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     _res = try; GLMakie.primary_resolution(); catch; (1600, 900); end
     fig = Figure(size = (round(Int, _res[1] * 0.92), round(Int, _res[2] * 0.88)))
 
     # ── Row 1: simulation toolbar (full width) ───────────────────────────────
-    toolbar = GridLayout(fig[1, 1:3])
+    toolbar = GridLayout(fig[1, 1:2])
     rowsize!(fig.layout, 1, Auto(false))
 
-    # ── Row 2: canvas | palette | properties ─────────────────────────────────
-    ax = Axis(fig[2, 1];
+    # ── Row 2: palette | canvas ───────────────────────────────────────────────
+    palette_grid    = GridLayout(fig[2, 1])
+    btn_tab_sources = Button(palette_grid[1, 1]; label = "Sources", tellwidth = true)
+    btn_tab_math    = Button(palette_grid[2, 1]; label = "Math",    tellwidth = true)
+    btn_tab_sinks   = Button(palette_grid[3, 1]; label = "Sinks",   tellwidth = true)
+    btn_tab_file    = Button(palette_grid[4, 1]; label = "File",    tellwidth = true)
+    all_tab_btns    = [btn_tab_sources, btn_tab_math, btn_tab_sinks, btn_tab_file]
+
+    ax = Axis(fig[2, 2];
         leftspinecolor   = RGBf(0.30, 0.50, 0.78),
         rightspinecolor  = RGBf(0.30, 0.50, 0.78),
         bottomspinecolor = RGBf(0.30, 0.50, 0.78),
@@ -363,19 +537,8 @@ function draw_diagram(diagram::BlockDiagram)
     hidedecorations!(ax)
     limits!(ax, -2.0, 14.0, -6.0, 6.0)
 
-    palette_grid    = GridLayout(fig[2, 2])
-    btn_tab_sources = Button(palette_grid[1, 1]; label = "Sources", tellwidth = true)
-    btn_tab_math    = Button(palette_grid[2, 1]; label = "Math",    tellwidth = true)
-    btn_tab_sinks   = Button(palette_grid[3, 1]; label = "Sinks",   tellwidth = true)
-    btn_tab_file    = Button(palette_grid[4, 1]; label = "File",    tellwidth = true)
-    all_tab_btns    = [btn_tab_sources, btn_tab_math, btn_tab_sinks, btn_tab_file]
-
-    props_grid = GridLayout(fig[2, 3])
-    Label(props_grid[1, 1:2], "Properties"; fontsize = 13, halign = :center)
-
-    colsize!(fig.layout, 1, Auto())      # canvas: fills space left by sidebars
-    colsize!(fig.layout, 2, Fixed(140))  # palette
-    colsize!(fig.layout, 3, Fixed(200))  # properties
+    colsize!(fig.layout, 1, Fixed(140))  # palette
+    colsize!(fig.layout, 2, Auto())      # canvas: fills remaining space
 
     rowsize!(fig.layout, 2, Relative(0.88))  # canvas: fills most of the window
 
@@ -393,7 +556,7 @@ function draw_diagram(diagram::BlockDiagram)
 
     # ── Row 3: status bar ─────────────────────────────────────────────────────
     status = Observable("Build a diagram, then click ▶ Run")
-    Label(fig[3, 1:3], status; tellwidth = false, fontsize = 12)
+    Label(fig[3, 1:2], status; tellwidth = false, fontsize = 12)
     rowsize!(fig.layout, 3, Auto(false))
 
     deregister_interaction!(ax, :rectanglezoom)
@@ -406,6 +569,7 @@ function draw_diagram(diagram::BlockDiagram)
     block_visuals  = Dict{AbstractBlock, BlockVisual}()
     conn_visuals   = Dict{Connection,    ConnVisual}()
     scope_screens  = Dict{AbstractBlock, Any}()
+    prop_screens   = Dict{AbstractBlock, Any}()
     last_result    = Ref{Union{Nothing, SimResult}}(nothing)
 
     # ── Draw existing diagram ─────────────────────────────────────────────────
@@ -423,91 +587,6 @@ function draw_diagram(diagram::BlockDiagram)
     lines!(ax, rubber_pts;
         color = :gray, linewidth = 1.5, linestyle = :dash, visible = wire_active)
 
-    # ── Properties panel ──────────────────────────────────────────────────────
-    prop_items = Ref{Vector{Any}}(Any[])
-
-    function clear_props!()
-        for item in prop_items[]
-            delete!(item)
-        end
-        prop_items[] = Any[]
-    end
-
-    function show_props!(block)
-        clear_props!()
-        bv = block_visuals[block]
-        row = Ref(2)
-
-        function add_field!(fname::String, value::String, on_commit)
-            r = row[]
-            push!(prop_items[],
-                Label(props_grid[r, 1], fname * ":";
-                    halign = :right, fontsize = 12))
-            tb = Textbox(props_grid[r, 2];
-                displayed_string = value,
-                tellwidth        = false,
-                fontsize         = 12)
-            push!(prop_items[], tb)
-            on(tb.stored_string) do s
-                s === nothing && return
-                try
-                    on_commit(s)
-                catch _
-                end
-            end
-            row[] += 1
-        end
-
-        add_field!("Name", block.name, s -> begin
-            block.name = s
-            bv.label.text[] = [s]
-        end)
-
-        if block isa ConstantBlock
-            add_field!("Value", string(block.value),
-                s -> block.value = parse(Float64, s))
-        elseif block isa GainBlock
-            add_field!("k", string(block.k),
-                s -> block.k = parse(Float64, s))
-        elseif block isa StepBlock
-            add_field!("Step time", string(block.step_time),
-                s -> block.step_time = parse(Float64, s))
-            add_field!("Before",    string(block.before),
-                s -> block.before    = parse(Float64, s))
-            add_field!("After",     string(block.after),
-                s -> block.after     = parse(Float64, s))
-        elseif block isa SineBlock
-            add_field!("Amplitude", string(block.amplitude),
-                s -> block.amplitude = parse(Float64, s))
-            add_field!("Frequency", string(block.frequency),
-                s -> block.frequency = parse(Float64, s))
-            add_field!("Phase",     string(block.phase),
-                s -> block.phase     = parse(Float64, s))
-            add_field!("Offset",    string(block.offset),
-                s -> block.offset    = parse(Float64, s))
-        elseif block isa IntegratorBlock
-            add_field!("Init state", string(block.state), s -> begin
-                v = parse(Float64, s)
-                block.state      = v
-                block.next_state = v
-            end)
-        elseif block isa UnitDelayBlock
-            add_field!("Init state", string(block.state), s -> begin
-                v = parse(Float64, s)
-                block.state      = v
-                block.next_state = v
-            end)
-        elseif block isa SumBlock
-            add_field!("Signs", block.signs, s -> block.signs = s)
-        elseif block isa ScopeBlock
-            add_field!("Title", block.title, s -> block.title = s)
-            push!(prop_items[],
-                Label(props_grid[row[], 1:2], "Ports: $(block.n_ports)  (set via palette)";
-                    fontsize = 11, halign = :left, color = :gray50))
-            row[] += 1
-        end
-    end
-
     # ── Interaction state ─────────────────────────────────────────────────────
     wire_src      = Ref{Union{Nothing, Tuple{Any, Symbol}}}(nothing)
     selected      = Ref{Union{Nothing, AbstractBlock}}(nothing)
@@ -518,7 +597,6 @@ function draw_diagram(diagram::BlockDiagram)
         _deselect_conn!()
         if selected[] !== nothing
             selected[] = nothing
-            clear_props!()
         end
         if wire_active[]
             wire_active[] = false
@@ -533,6 +611,10 @@ function draw_diagram(diagram::BlockDiagram)
             try; screen.window_open[] && close(screen); catch _; end
         end
         empty!(scope_screens)
+        for (_, screen) in prop_screens
+            try; screen.window_open[] && close(screen); catch _; end
+        end
+        empty!(prop_screens)
     end
 
     function _cancel_wire!()
@@ -557,7 +639,6 @@ function draw_diagram(diagram::BlockDiagram)
         if selected[] !== nothing
             block_strokes[selected[]][] = :black
             selected[] = nothing
-            clear_props!()
         end
     end
 
@@ -608,8 +689,7 @@ function draw_diagram(diagram::BlockDiagram)
                             c                      = block_centers[block][]
                             drag_offset[]          = (c[1] - pos[1], c[2] - pos[2])
                             block_strokes[block][] = :dodgerblue
-                            show_props!(block)
-                            status[] = "$(block.name) selected — edit properties on the right, Delete to remove"
+                            status[] = "$(block.name) selected — double-click to edit properties, Delete to remove"
                             break
                         end
                     end
@@ -637,6 +717,9 @@ function draw_diagram(diagram::BlockDiagram)
                         else
                             status[] = "Run the simulation first, then double-click a Scope block"
                         end
+                    else
+                        _open_props_window!(block, block_visuals, prop_screens)
+                        status[] = "Properties opened for $(block.name)"
                     end
                     break
                 end
@@ -674,7 +757,6 @@ function draw_diagram(diagram::BlockDiagram)
             elseif selected[] !== nothing
                 block = selected[]
                 selected[] = nothing
-                clear_props!()
                 _delete_block!(ax, diagram, block,
                     block_centers, block_strokes, port_pos, port_type,
                     block_visuals, conn_visuals)
@@ -690,12 +772,15 @@ function draw_diagram(diagram::BlockDiagram)
     function clear_pal!()
         for item in pal_items[]; delete!(item); end
         pal_items[] = Any[]
+        trim!(palette_grid)   # drop ghost empty rows left by the previous tab
     end
 
     sources_pal = [
         ("Constant",  () -> ConstantBlock(0.0)),
         ("Step",      () -> StepBlock()),
         ("Sine",      () -> SineBlock()),
+        ("Ramp",      () -> RampBlock()),
+        ("Clock",     () -> ClockBlock()),
     ]
     math_pal = [
         ("Gain",       () -> GainBlock(1.0)),
@@ -703,11 +788,19 @@ function draw_diagram(diagram::BlockDiagram)
         ("Sum  +-",    () -> SumBlock("+-")),
         ("Integrator", () -> IntegratorBlock(0.0)),
         ("Unit Delay", () -> UnitDelayBlock(0.0)),
+        ("Product ×2", () -> ProductBlock([:mul, :mul])),
+        ("Saturation", () -> SaturationBlock()),
+        ("Abs",        () -> AbsBlock()),
+        ("Derivative", () -> DerivativeBlock()),
+        ("PID",        () -> PIDBlock()),
+        ("Lookup 1D",  () -> LookupTable1DBlock()),
     ]
     sinks_pal = [
-        ("Scope",    () -> ScopeBlock()),
-        ("Scope ×2", () -> ScopeBlock(n_ports = 2)),
-        ("Scope ×3", () -> ScopeBlock(n_ports = 3)),
+        ("Scope",      () -> ScopeBlock()),
+        ("Scope ×2",   () -> ScopeBlock(n_ports = 2)),
+        ("Scope ×3",   () -> ScopeBlock(n_ports = 3)),
+        ("Workspace",  () -> WorkspaceBlock()),
+        ("Terminator", () -> TerminatorBlock()),
     ]
 
     function _set_active_tab!(active_btn)
