@@ -15,9 +15,21 @@ using JSON3
 export draw_diagram
 
 const BLOCK_W  = 1.2
-const BLOCK_H  = 0.7
+const BLOCK_H  = 0.85
 const PORT_PX  = 12
 const PORT_HIT = 0.18
+const STRIP_FRAC = 0.30          # bottom fraction of block used as name strip
+
+const _WIRE_COLOR  = RGBf(0.19, 0.43, 0.69)
+const _SEL_COLOR   = RGBf(0.12, 0.56, 1.00)   # selection highlight
+const _ORA_COLOR   = RGBf(1.00, 0.55, 0.00)   # selected wire
+
+const _BLUE_BORDER = RGBf(0.19, 0.43, 0.69)   # sources / most math blocks
+const _BLUE_ICON   = RGBf(0.93, 0.96, 1.00)
+const _AMGR_BORDER = RGBf(0.75, 0.40, 0.05)   # PID
+const _AMGR_ICON   = RGBf(0.99, 0.95, 0.88)
+const _GRNN_BORDER = RGBf(0.20, 0.60, 0.25)   # sinks
+const _GRNN_ICON   = RGBf(0.92, 0.98, 0.93)
 
 # Height scales up for blocks with many ports so hit-circles never overlap.
 # Minimum spacing between adjacent ports must exceed PORT_HIT.
@@ -30,14 +42,44 @@ _block_height(block) =
 # ── Internal visual tracking ──────────────────────────────────────────────────
 
 mutable struct BlockVisual
-    rect  :: Any
-    label :: Any
-    ports :: Vector{Any}
+    strip        :: Any       # bottom name strip
+    icon         :: Any       # top icon zone fill
+    border       :: Any       # outer border (reactive stroke for selection)
+    divider      :: Any       # separator line between icon and strip
+    sym          :: Any       # type symbol text in icon zone
+    label        :: Any       # block name text in strip
+    ports        :: Vector{Any}
+    border_color :: RGBf      # natural border color (restored on deselect)
 end
 
 mutable struct ConnVisual
     curve :: Any
     arrow :: Any
+end
+
+# ── Block type icons and colors ───────────────────────────────────────────────
+
+function _block_icon(block)
+    if     block isa ConstantBlock      return ("1",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa StepBlock          return ("⎍",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa SineBlock          return ("∿",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa RampBlock          return ("╱",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa ClockBlock         return ("⏱",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa GainBlock          return ("▷",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa SumBlock           return ("Σ",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa IntegratorBlock    return ("∫",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa UnitDelayBlock     return ("z⁻¹",  _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa ProductBlock       return ("×",    _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa SaturationBlock    return ("sat",  _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa AbsBlock           return ("|u|",  _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa DerivativeBlock    return ("d/dt", _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa PIDBlock           return ("PID",  _AMGR_BORDER, _AMGR_ICON)
+    elseif block isa LookupTable1DBlock return ("f(x)", _BLUE_BORDER, _BLUE_ICON)
+    elseif block isa ScopeBlock         return ("∿",    _GRNN_BORDER, _GRNN_ICON)
+    elseif block isa WorkspaceBlock     return ("ws",   _GRNN_BORDER, _GRNN_ICON)
+    elseif block isa TerminatorBlock    return ("▪",    _GRNN_BORDER, _GRNN_ICON)
+    else                                return ("?",    _BLUE_BORDER, _BLUE_ICON)
+    end
 end
 
 # ── Geometry helpers ──────────────────────────────────────────────────────────
@@ -106,7 +148,9 @@ function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_t
     cx, cy = block.position
     bh = _block_height(block)
     c  = Observable(Point2f(cx, cy))
-    sc = Observable{Symbol}(:black)
+
+    sym_text, bdr_color, icon_bg = _block_icon(block)
+    sc = Observable{Any}(bdr_color)
     block_centers[block] = c
     block_strokes[block] = sc
 
@@ -125,30 +169,67 @@ function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_t
         port_type[(block, p)] = :output
     end
 
-    rect_pts = @lift Point2f[
+    # Name strip — bottom STRIP_FRAC of block height
+    strip_pts = @lift Point2f[
+        ($c[1] - BLOCK_W/2, $c[2] - bh/2),
+        ($c[1] + BLOCK_W/2, $c[2] - bh/2),
+        ($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        ($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+    ]
+    strip = poly!(ax, strip_pts; color = :white, strokewidth = 0)
+
+    # Icon zone — top (1-STRIP_FRAC) of block height
+    icon_pts = @lift Point2f[
+        ($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        ($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        ($c[1] + BLOCK_W/2, $c[2] + bh/2),
+        ($c[1] - BLOCK_W/2, $c[2] + bh/2),
+    ]
+    icon = poly!(ax, icon_pts; color = icon_bg, strokewidth = 0)
+
+    # Thin separator line between icon zone and name strip
+    div_pts = @lift [
+        Point2f($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        Point2f($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+    ]
+    divider = lines!(ax, div_pts; color = bdr_color, linewidth = 0.8)
+
+    # Outer border — transparent fill, reactive strokecolor for selection highlight
+    border_pts = @lift Point2f[
         ($c[1] - BLOCK_W/2, $c[2] - bh/2),
         ($c[1] + BLOCK_W/2, $c[2] - bh/2),
         ($c[1] + BLOCK_W/2, $c[2] + bh/2),
         ($c[1] - BLOCK_W/2, $c[2] + bh/2),
     ]
-    rect  = poly!(ax, rect_pts;
-        color = RGBf(0.93, 0.96, 1.0), strokecolor = sc, strokewidth = 2)
-    label = text!(ax, @lift([$c]);
-        text = [block.name], align = (:center, :center), fontsize = 13)
+    border = poly!(ax, border_pts;
+        color = (:white, 0f0), strokecolor = sc, strokewidth = 2)
+
+    # Type symbol centred in the icon zone
+    icon_center_y = @lift Point2f($c[1],
+        $c[2] - bh/2 + bh*(STRIP_FRAC + (1f0 - STRIP_FRAC)/2f0))
+    sym = text!(ax, @lift([$icon_center_y]);
+        text = [sym_text], align = (:center, :center),
+        fontsize = 15, color = bdr_color)
+
+    # Block name centred in the strip
+    strip_center_y = @lift Point2f($c[1], $c[2] - bh/2 + bh*STRIP_FRAC/2f0)
+    label = text!(ax, @lift([$strip_center_y]);
+        text = [block.name], align = (:center, :center),
+        fontsize = 10, color = RGBf(0.20, 0.20, 0.20))
 
     port_plots = Any[]
     for p in iports
         push!(port_plots,
             scatter!(ax, @lift([$(port_pos[(block, p)])]);
-                color = :steelblue, markersize = PORT_PX))
+                color = RGBf(0.25, 0.45, 0.75), markersize = PORT_PX))
     end
     for p in oports
         push!(port_plots,
             scatter!(ax, @lift([$(port_pos[(block, p)])]);
-                color = :tomato, markersize = PORT_PX))
+                color = RGBf(0.82, 0.28, 0.22), markersize = PORT_PX))
     end
 
-    return BlockVisual(rect, label, port_plots)
+    return BlockVisual(strip, icon, border, divider, sym, label, port_plots, bdr_color)
 end
 
 function _add_connection_visual!(ax, conn, port_pos)
@@ -160,10 +241,10 @@ function _add_connection_visual!(ax, conn, port_pos)
         xs, ys = _bezier(p0[1], p0[2], p1[1], p1[2])
         Point2f.(xs, ys)
     end
-    curve = lines!(ax, curve_pts; color = :black, linewidth = 1.5)
+    curve = lines!(ax, curve_pts; color = _WIRE_COLOR, linewidth = 1.8)
 
     arrow_pts = @lift _arrowhead($src_obs, $dst_obs)
-    arrow = poly!(ax, arrow_pts; color = :black)
+    arrow = poly!(ax, arrow_pts; color = _WIRE_COLOR)
 
     return ConnVisual(curve, arrow)
 end
@@ -184,7 +265,11 @@ function _delete_block!(ax, diagram, block,
     remove_block!(diagram, block)
 
     bv = block_visuals[block]
-    delete!(ax, bv.rect)
+    delete!(ax, bv.strip)
+    delete!(ax, bv.icon)
+    delete!(ax, bv.border)
+    delete!(ax, bv.divider)
+    delete!(ax, bv.sym)
     delete!(ax, bv.label)
     for s in bv.ports; delete!(ax, s); end
 
@@ -520,39 +605,82 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     rowsize!(fig.layout, 1, Auto(false))
 
     # ── Row 2: palette | canvas ───────────────────────────────────────────────
-    palette_grid    = GridLayout(fig[2, 1])
-    btn_tab_sources = Button(palette_grid[1, 1]; label = "Sources", tellwidth = true)
-    btn_tab_math    = Button(palette_grid[2, 1]; label = "Math",    tellwidth = true)
-    btn_tab_sinks   = Button(palette_grid[3, 1]; label = "Sinks",   tellwidth = true)
-    btn_tab_file    = Button(palette_grid[4, 1]; label = "File",    tellwidth = true)
+    palette_grid = GridLayout(fig[2, 1])
+
+    # Row 1: "Block Library" header (spans both columns)
+    Label(palette_grid[1, 1:2], "Block Library";
+        fontsize = 13, font = :bold, halign = :left,
+        color = RGBf(0.15, 0.15, 0.15))
+
+    # Row 2: search box — placing items here creates columns 1 and 2
+    Label(palette_grid[2, 1], "⌕";
+        fontsize = 13, halign = :center, color = RGBf(0.55, 0.55, 0.55))
+    tb_search = Textbox(palette_grid[2, 2];
+        displayed_string = "", tellwidth = true, fontsize = 11)
+
+    # Now both columns exist — set their sizes
+    colsize!(palette_grid, 1, Fixed(28))   # icon-chip column
+    colsize!(palette_grid, 2, Auto())      # name / button column
+
+    # Rows 3-6: category tab buttons (span both columns)
+    btn_tab_sources = Button(palette_grid[3, 1:2]; label = "Sources", tellwidth = true)
+    btn_tab_math    = Button(palette_grid[4, 1:2]; label = "Math",    tellwidth = true)
+    btn_tab_sinks   = Button(palette_grid[5, 1:2]; label = "Sinks",   tellwidth = true)
+    btn_tab_file    = Button(palette_grid[6, 1:2]; label = "File",    tellwidth = true)
     all_tab_btns    = [btn_tab_sources, btn_tab_math, btn_tab_sinks, btn_tab_file]
 
     ax = Axis(fig[2, 2];
-        leftspinecolor   = RGBf(0.30, 0.50, 0.78),
-        rightspinecolor  = RGBf(0.30, 0.50, 0.78),
-        bottomspinecolor = RGBf(0.30, 0.50, 0.78),
-        topspinecolor    = RGBf(0.30, 0.50, 0.78),
-        spinewidth       = 2,
-        backgroundcolor  = RGBf(0.97, 0.98, 1.00))
+        leftspinecolor   = RGBf(0.89, 0.88, 0.85),
+        rightspinecolor  = RGBf(0.89, 0.88, 0.85),
+        bottomspinecolor = RGBf(0.89, 0.88, 0.85),
+        topspinecolor    = RGBf(0.89, 0.88, 0.85),
+        spinewidth       = 1,
+        backgroundcolor  = RGBf(0.98, 0.98, 0.97))
     hidedecorations!(ax)
     limits!(ax, -2.0, 14.0, -6.0, 6.0)
+
+    # Dot grid — drawn once as background; zooms with the canvas naturally
+    let xs = Float64[], ys = Float64[]
+        for x in -2.0:0.5:14.0, y in -6.0:0.5:6.0
+            push!(xs, x); push!(ys, y)
+        end
+        scatter!(ax, xs, ys; color = RGBf(0.79, 0.82, 0.87), markersize = 3)
+    end
 
     colsize!(fig.layout, 1, Fixed(140))  # palette
     colsize!(fig.layout, 2, Auto())      # canvas: fills remaining space
 
     rowsize!(fig.layout, 2, Relative(0.88))  # canvas: fills most of the window
 
-    btn_run = Button(toolbar[1, 1]; label = "▶  Run")
-    Label(toolbar[1, 2], "  t:";  tellwidth = false)
-    tb_tstart = Textbox(toolbar[1, 3];
+    # ── Menubar strip (row 1) ────────────────────────────────────────────────────
+    rowsize!(toolbar, 1, Fixed(24))
+    Label(toolbar[1, 1], "  SimuLite";
+        fontsize = 14, font = :bold, halign = :left, color = RGBf(0.15, 0.15, 0.15))
+    Label(toolbar[1, 2], "File";       fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 3], "Edit";       fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 4], "View";       fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 5], "Diagram";    fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 6], "Simulation"; fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 7], "Help";       fontsize = 12, halign = :center, color = RGBf(0.33, 0.33, 0.33))
+    Label(toolbar[1, 8], ""; tellwidth = true)   # flex spacer
+
+    # ── Main toolbar row (row 2) ─────────────────────────────────────────────────
+    btn_run = Button(toolbar[2, 1]; label = "▶  Run",
+        buttoncolor = RGBf(0.22, 0.62, 0.32), labelcolor = :white)
+    Label(toolbar[2, 2], " │"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Label(toolbar[2, 3], "Start:"; tellwidth = false, fontsize = 12)
+    tb_tstart = Textbox(toolbar[2, 4];
         displayed_string = string(diagram.config.tspan[1]), width = 60)
-    Label(toolbar[1, 4], "→";  tellwidth = false)
-    tb_tend   = Textbox(toolbar[1, 5];
+    Label(toolbar[2, 5], "→"; tellwidth = false)
+    Label(toolbar[2, 6], "Stop:"; tellwidth = false, fontsize = 12)
+    tb_tend   = Textbox(toolbar[2, 7];
         displayed_string = string(diagram.config.tspan[2]), width = 60)
-    Label(toolbar[1, 6], "  dt:"; tellwidth = false)
-    tb_dt     = Textbox(toolbar[1, 7];
+    Label(toolbar[2, 8], " │"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Label(toolbar[2, 9], "dt:"; tellwidth = false, fontsize = 12)
+    tb_dt     = Textbox(toolbar[2, 10];
         displayed_string = string(diagram.config.dt), width = 60)
-    btn_clear = Button(toolbar[1, 8]; label = "Clear")
+    Label(toolbar[2, 11], ""; tellwidth = true)  # flex spacer
+    btn_clear = Button(toolbar[2, 12]; label = "Clear")
 
     # ── Row 3: status bar ─────────────────────────────────────────────────────
     status = Observable("Build a diagram, then click ▶ Run")
@@ -563,7 +691,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
 
     # ── State dicts ───────────────────────────────────────────────────────────
     block_centers  = Dict{AbstractBlock, Observable{Point2f}}()
-    block_strokes  = Dict{AbstractBlock, Observable{Symbol}}()
+    block_strokes  = Dict{AbstractBlock, Observable{Any}}()
     port_pos       = Dict{Tuple{Any, Symbol}, Observable{Point2f}}()
     port_type      = Dict{Tuple{Any, Symbol}, Symbol}()
     block_visuals  = Dict{AbstractBlock, BlockVisual}()
@@ -627,8 +755,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         if selected_conn[] !== nothing
             cv = get(conn_visuals, selected_conn[], nothing)
             if cv !== nothing
-                cv.curve.color[] = :black
-                cv.arrow.color[] = :black
+                cv.curve.color[] = _WIRE_COLOR
+                cv.arrow.color[] = _WIRE_COLOR
             end
             selected_conn[] = nothing
         end
@@ -637,7 +765,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     function _deselect!()
         _deselect_conn!()
         if selected[] !== nothing
-            block_strokes[selected[]][] = :black
+            block_strokes[selected[]][] = block_visuals[selected[]].border_color
             selected[] = nothing
         end
     end
@@ -688,7 +816,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                             selected[]             = block
                             c                      = block_centers[block][]
                             drag_offset[]          = (c[1] - pos[1], c[2] - pos[2])
-                            block_strokes[block][] = :dodgerblue
+                            block_strokes[block][] = _SEL_COLOR
                             status[] = "$(block.name) selected — double-click to edit properties, Delete to remove"
                             break
                         end
@@ -697,8 +825,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                         for (conn, cv) in conn_visuals
                             if _hit_connection(conn, port_pos, pos)
                                 selected_conn[]    = conn
-                                cv.curve.color[]   = :orange
-                                cv.arrow.color[]   = :orange
+                                cv.curve.color[]   = _ORA_COLOR
+                                cv.arrow.color[]   = _ORA_COLOR
                                 status[] = "Connection selected — press Delete to remove"
                                 break
                             end
@@ -766,42 +894,48 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     end
 
     # ── Palette: tabbed content ───────────────────────────────────────────────
-    pal_items    = Ref{Vector{Any}}(Any[])
-    filename_ref = Ref{String}("diagram.json")
+    # State
+    pal_items        = Ref{Vector{Any}}(Any[])
+    next_content_row = Ref(7)    # rows 1-6 are header/search/tabs (permanent)
+    active_tab       = Ref{Symbol}(:sources)
+    search_obs       = Observable("")
+    filename_ref     = Ref{String}("diagram.json")
+
+    # Palette data: (icon_sym, border_color, label, factory)
+    sources_pal = [
+        ("1",    _BLUE_BORDER, "Constant",   () -> ConstantBlock(0.0)),
+        ("⎍",    _BLUE_BORDER, "Step",       () -> StepBlock()),
+        ("∿",    _BLUE_BORDER, "Sine",       () -> SineBlock()),
+        ("╱",    _BLUE_BORDER, "Ramp",       () -> RampBlock()),
+        ("⏱",    _BLUE_BORDER, "Clock",      () -> ClockBlock()),
+    ]
+    math_pal = [
+        ("▷",    _BLUE_BORDER, "Gain",       () -> GainBlock(1.0)),
+        ("Σ",    _BLUE_BORDER, "Sum  ++",    () -> SumBlock("++")),
+        ("Σ",    _BLUE_BORDER, "Sum  +-",    () -> SumBlock("+-")),
+        ("∫",    _BLUE_BORDER, "Integrator", () -> IntegratorBlock(0.0)),
+        ("z⁻¹",  _BLUE_BORDER, "Unit Delay", () -> UnitDelayBlock(0.0)),
+        ("×",    _BLUE_BORDER, "Product ×2", () -> ProductBlock([:mul, :mul])),
+        ("sat",  _BLUE_BORDER, "Saturation", () -> SaturationBlock()),
+        ("|u|",  _BLUE_BORDER, "Abs",        () -> AbsBlock()),
+        ("d/dt", _BLUE_BORDER, "Derivative", () -> DerivativeBlock()),
+        ("PID",  _AMGR_BORDER, "PID",        () -> PIDBlock()),
+        ("f(x)", _BLUE_BORDER, "Lookup 1D",  () -> LookupTable1DBlock()),
+    ]
+    sinks_pal = [
+        ("∿",    _GRNN_BORDER, "Scope",      () -> ScopeBlock()),
+        ("∿",    _GRNN_BORDER, "Scope ×2",   () -> ScopeBlock(n_ports = 2)),
+        ("∿",    _GRNN_BORDER, "Scope ×3",   () -> ScopeBlock(n_ports = 3)),
+        ("ws",   _GRNN_BORDER, "Workspace",  () -> WorkspaceBlock()),
+        ("▪",    _GRNN_BORDER, "Terminator", () -> TerminatorBlock()),
+    ]
 
     function clear_pal!()
         for item in pal_items[]; delete!(item); end
         pal_items[] = Any[]
-        trim!(palette_grid)   # drop ghost empty rows left by the previous tab
+        next_content_row[] = 7
+        trim!(palette_grid)
     end
-
-    sources_pal = [
-        ("Constant",  () -> ConstantBlock(0.0)),
-        ("Step",      () -> StepBlock()),
-        ("Sine",      () -> SineBlock()),
-        ("Ramp",      () -> RampBlock()),
-        ("Clock",     () -> ClockBlock()),
-    ]
-    math_pal = [
-        ("Gain",       () -> GainBlock(1.0)),
-        ("Sum  ++",    () -> SumBlock("++")),
-        ("Sum  +-",    () -> SumBlock("+-")),
-        ("Integrator", () -> IntegratorBlock(0.0)),
-        ("Unit Delay", () -> UnitDelayBlock(0.0)),
-        ("Product ×2", () -> ProductBlock([:mul, :mul])),
-        ("Saturation", () -> SaturationBlock()),
-        ("Abs",        () -> AbsBlock()),
-        ("Derivative", () -> DerivativeBlock()),
-        ("PID",        () -> PIDBlock()),
-        ("Lookup 1D",  () -> LookupTable1DBlock()),
-    ]
-    sinks_pal = [
-        ("Scope",      () -> ScopeBlock()),
-        ("Scope ×2",   () -> ScopeBlock(n_ports = 2)),
-        ("Scope ×3",   () -> ScopeBlock(n_ports = 3)),
-        ("Workspace",  () -> WorkspaceBlock()),
-        ("Terminator", () -> TerminatorBlock()),
-    ]
 
     function _set_active_tab!(active_btn)
         for btn in all_tab_btns
@@ -810,11 +944,15 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         end
     end
 
-    # Appends one block button to the palette. Tab buttons occupy rows 1-4,
-    # so content starts at row 5; index into pal_items[] gives the offset.
-    function _pal_block!(lbl_text, factory)
-        row = length(pal_items[]) + 5
-        btn = Button(palette_grid[row, 1]; label = lbl_text, tellwidth = true)
+    # One palette row = chip label (col 1) + clickable button (col 2).
+    function _pal_block!(sym_text, bdr_color, lbl_text, factory)
+        row = next_content_row[]
+        next_content_row[] += 1
+
+        chip = Label(palette_grid[row, 1], sym_text;
+            fontsize = 11, halign = :center, valign = :center, color = bdr_color)
+        btn  = Button(palette_grid[row, 2]; label = lbl_text,
+            tellwidth = true, fontsize = 11)
         on(btn.clicks) do _
             block = factory()
             r = ax.finallimits[]
@@ -831,41 +969,59 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 block_centers, block_strokes, port_pos, port_type)
             status[] = "Added $(block.name) — drag to position"
         end
+        push!(pal_items[], chip)
         push!(pal_items[], btn)
     end
 
-    function show_sources_tab!()
+    # Build (or rebuild) the current tab's items, filtered by search_obs.
+    function _build_pal!(items)
         clear_pal!()
+        txt = lowercase(search_obs[])
+        for (sym, clr, lbl, factory) in items
+            if isempty(txt) || occursin(txt, lowercase(lbl))
+                _pal_block!(sym, clr, lbl, factory)
+            end
+        end
+    end
+
+    function show_sources_tab!()
+        active_tab[] = :sources
         _set_active_tab!(btn_tab_sources)
-        for (lbl, factory) in sources_pal; _pal_block!(lbl, factory); end
+        _build_pal!(sources_pal)
     end
 
     function show_math_tab!()
-        clear_pal!()
+        active_tab[] = :math
         _set_active_tab!(btn_tab_math)
-        for (lbl, factory) in math_pal; _pal_block!(lbl, factory); end
+        _build_pal!(math_pal)
     end
 
     function show_sinks_tab!()
-        clear_pal!()
+        active_tab[] = :sinks
         _set_active_tab!(btn_tab_sinks)
-        for (lbl, factory) in sinks_pal; _pal_block!(lbl, factory); end
+        _build_pal!(sinks_pal)
     end
 
     function show_file_tab!()
         clear_pal!()
+        active_tab[] = :file
         _set_active_tab!(btn_tab_file)
-        row = Ref(5)
 
-        function fadd!(w); push!(pal_items[], w); row[] += 1; w; end
+        function fadd!(w)
+            push!(pal_items[], w)
+            next_content_row[] += 1
+            w
+        end
 
-        fadd!(Label(palette_grid[row[], 1], "Filename:";
-            fontsize = 11, halign = :left))
-        tb = fadd!(Textbox(palette_grid[row[], 1];
+        r = next_content_row[]
+        fadd!(Label(palette_grid[r, 1:2], "Filename:"; fontsize = 11, halign = :left))
+        r = next_content_row[]
+        tb = fadd!(Textbox(palette_grid[r, 1:2];
             displayed_string = filename_ref[], tellwidth = true, fontsize = 11))
         on(tb.stored_string) do s; s === nothing || (filename_ref[] = s); end
 
-        btn_save = fadd!(Button(palette_grid[row[], 1]; label = "Save", tellwidth = true))
+        r = next_content_row[]
+        btn_save = fadd!(Button(palette_grid[r, 1:2]; label = "Save", tellwidth = true))
         on(btn_save.clicks) do _
             path = filename_ref[]
             isempty(path) && (path = "diagram.json")
@@ -877,7 +1033,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             end
         end
 
-        btn_load = fadd!(Button(palette_grid[row[], 1]; label = "Load", tellwidth = true))
+        r = next_content_row[]
+        btn_load = fadd!(Button(palette_grid[r, 1:2]; label = "Load", tellwidth = true))
         on(btn_load.clicks) do _
             path = filename_ref[]
             isempty(path) && (path = "diagram.json")
@@ -912,6 +1069,18 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 status[] = "Load failed: $(sprint(showerror, e))"
                 @warn "Load error" exception = (e, catch_backtrace())
             end
+        end
+    end
+
+    # Wire search textbox → rebuild current tab
+    on(tb_search.stored_string) do s
+        s === nothing && return
+        search_obs[] = lowercase(s)
+    end
+    on(search_obs) do _
+        if     active_tab[] == :sources; _build_pal!(sources_pal)
+        elseif active_tab[] == :math;    _build_pal!(math_pal)
+        elseif active_tab[] == :sinks;   _build_pal!(sinks_pal)
         end
     end
 

@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-22 — session 3)
+## Current state (as of session 2026-06-23 — session 4)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
@@ -98,7 +98,17 @@ test/
 - **Two simulation backends** — runner (fixed-step, fast, used by GUI); compiler (MTK ODE, accurate, available as advanced mode).
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
 - **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
-- **4-tab palette on the LEFT** — "Sources", "Math", "Sinks", and "File" tabs share the 140px left sidebar; canvas fills all remaining space to the right. `_pal_block!` computes row as `length(pal_items[]) + 5`; `trim!(palette_grid)` called on tab switch to drop ghost empty rows.
+- **Icon-card block visual style** (wireframe Style C) — each block is split into two zones: top ~70% is a tinted icon zone with the type symbol (`⎍`, `Σ`, `PID`, `∿`, …), bottom 30% is a white name strip. Three category border colors: blue (`_BLUE_BORDER`) for Sources + most Math, amber (`_AMGR_BORDER`) for PID, green (`_GRNN_BORDER`) for Sinks. Selection uses bright dodgerblue `_SEL_COLOR`; deselect restores the block's natural `border_color` stored in `BlockVisual`.
+- **Blue wires** — connections drawn in `_WIRE_COLOR = RGBf(0.19, 0.43, 0.69)` (linewidth 1.8); turn orange `_ORA_COLOR` on selection, restored on deselect.
+- **Dot grid canvas** — 825 scatter dots at 0.5-unit spacing on warm-white background `RGBf(0.98, 0.98, 0.97)`; dots zoom with the canvas naturally.
+- **2-row toolbar** — row 1: thin 24px menubar strip with "SimuLite" bold title + File/Edit/View/Diagram/Simulation/Help labels; row 2: green `▶ Run` button, visual `│` separators, `Start: [t0] → Stop: [t1]`, `dt: [dt]`, `Clear`.
+- **Block Library panel** (2-column layout, 140px total):
+  - Row 1: "Block Library" bold header
+  - Row 2: `⌕` icon (col 1, 28px) + search `Textbox` (col 2, Auto)
+  - Rows 3–6: Sources / Math / Sinks / File tab buttons (span 1:2)
+  - Rows 7+: icon chip (col 1, category-colored symbol) + name button (col 2)
+  - `next_content_row` Ref (starts at 7, reset on `clear_pal!`) tracks next row; no more `length(pal_items[]) + 5` offset
+  - `search_obs` Observable + `on(tb_search.stored_string)` → live filter; `_build_pal!(items)` rebuilds from 4-tuple `(sym, color, label, factory)` list; File tab excluded from search
 - **Dynamic block height** — `_block_height(block)` scales height as `max(BLOCK_H, PORT_HIT × 1.4 × (n_ports + 1))` so port hit-circles never overlap on multi-port blocks (e.g. Scope ×3).
 - **Floating properties windows** — double-clicking any non-Scope block opens a dedicated `GLMakie.Screen` (300×380 px) with editable fields; tracked per-block in `prop_screens` dict; replaced on re-open. `_clear_all!` closes all prop windows.
 - **Scope windows** — `ScopeBlock` opens a dedicated `GLMakie.Screen` window on double-click; tracked per-block in `scope_screens` dict; `screen.window_open[]` guards against duplicate windows; old window is always replaced on re-run.
@@ -107,16 +117,17 @@ test/
 
 ---
 
-## GUI — COMPLETE (Phases 1–9)
+## GUI — COMPLETE (Phases 1–10)
 
 ### What `draw_diagram()` gives you
 Opening the GUI shows a 3-row window sized to 92 × 88% of the primary monitor:
 
 | Area | Location | Purpose |
 |---|---|---|
-| Toolbar | row 1 (auto height) | Run, tspan, dt, Clear — always visible at top |
-| Palette | row 2, left (140px) | 4 tabs: Sources / Math / Sinks / File |
-| Canvas | row 2, right (Auto) | Drag blocks, draw wires — blue border, light blue background |
+| Menubar strip | row 1, top 24px | SimuLite title + File/Edit/View/Diagram/Simulation/Help labels |
+| Toolbar | row 1 (auto height) | Green ▶ Run, Start/Stop time fields, dt field, Clear |
+| Block Library | row 2, left (140px) | Header + search box + 4 tabs; blocks shown as icon chip + name |
+| Canvas | row 2, right (Auto) | Dot-grid warm-white background; blocks as icon cards; blue wires |
 | Status bar | row 3 (auto height) | Current action / error messages |
 | Properties windows | separate OS windows | One per block, opened on double-click |
 | Scope windows | separate OS windows | One per ScopeBlock, opened on double-click after run |
@@ -145,28 +156,26 @@ Opening the GUI shows a 3-row window sized to 92 × 88% of the primary monitor:
 
 ## Known bugs / open issues
 
-### Palette widget squashing *(not yet fixed)*
-Buttons and input fields in the palette sometimes render at near-zero height.
-Attempted fix (`trim!(palette_grid)` after `clear_pal!()`) has not confirmed resolution.
-**Root cause hypothesis**: GLMakie retains row height metadata for deleted cells even after `trim!`;
-the layout engine distributes height across all historically-created rows rather than only currently-populated ones.
-**Next steps to investigate**:
-- Use explicit `rowsize!(palette_grid, r, Auto())` after trim
-- Or rebuild `palette_grid` from scratch on each tab switch instead of deleting/re-adding widgets
+### Palette widget squashing *(likely fixed — needs confirmation)*
+Previously: buttons/inputs sometimes rendered at near-zero height when switching tabs.
+Session 4 changed the row tracking from `length(pal_items[]) + 5` (accumulated offset) to
+`next_content_row[]` (explicit counter, reset to 7 on `clear_pal!`). This eliminates the ghost-row
+accumulation that was the suspected root cause. `trim!(palette_grid)` is still called.
+**Status**: needs user confirmation that squashing no longer occurs after tab switches.
 
 ---
 
 ## Remaining work
 
 ### Polish items (if time allows before thesis demo)
-- Block type label displayed inside the rectangle (e.g. "Gain" subtitle above block name)
-- Per-type block colors (`BLOCK_COLOR` dict keyed on block type) — makes canvas look more Simulink-like
+- ~~Block type label displayed inside the rectangle~~ — **done** (icon zone with type symbol)
+- ~~Per-type block colors~~ — **done** (blue/amber/green by category; PID gets amber accent)
+- Confirm palette squashing bug is resolved (see Known bugs above)
 - Right-click context menu to delete block or wire
 - Port name labels on hover
 - Snap-to-grid for block positioning
 - Undo/redo stack
 - Rename validation (reject empty names, reject duplicate names before committing)
-- Fix palette widget squashing bug (see Known bugs above)
 
 ### GUI dependency decision (permanent)
 The GUI stays on **GLMakie only** — no Gtk.jl or Cairo.jl.
