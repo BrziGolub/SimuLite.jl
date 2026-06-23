@@ -3,11 +3,11 @@ module Runner
 using ..Types
 using ..Diagram
 
-import ..BlocksAPI: evaluate!, commit_state!
+import ..BlocksAPI: evaluate!, commit_state!, initialize!
 
 export simulate
 
-function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing)
+function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing, continue_sim=false)
 
     tspan = something(tspan, diagram.config.tspan)
     dt    = something(dt,    diagram.config.dt)
@@ -16,6 +16,12 @@ function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing)
     t = t0
 
     order = get_execution_order(diagram)
+
+    if !continue_sim
+        for b in order
+            initialize!(b)
+        end
+    end
 
     t_log = Float64[]
     data  = Dict{String, Vector{Float64}}()

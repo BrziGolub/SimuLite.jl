@@ -11,7 +11,8 @@ Target: working GUI on top of a solid simulation engine.
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
 - ODE compiler path via ModelingToolkit (`simulate_ode`) — symbolic ODE system, adaptive solver
-- Two-phase execution: `evaluate!` (output current state) → inline propagation → `commit_state!` (advance state)
+- Three-phase block lifecycle: `initialize!` (reset state) → `evaluate!` (output current state) → `commit_state!` (advance state)
+- `simulate` calls `initialize!` on every block before the loop; pass `continue_sim=true` to skip and carry over final states from the previous run
 - Topological sort (Kahn's algorithm) — blocks always evaluated in dependency order
 - `simulate` returns `SimResult(t, data)` — time vector + named signal vectors
 
@@ -65,7 +66,7 @@ src/
     diagram.jl              — add_block!, connect!, disconnect!,
                               remove_block!, get_execution_order
     blocks/
-      api.jl                — evaluate!, commit_state!,
+      api.jl                — evaluate!, commit_state!, initialize!,
                               input_ports, output_ports
       common.jl             — BlockBase, _next_id() counter
       sources.jl            — ConstantBlock, StepBlock, SineBlock,
@@ -93,7 +94,7 @@ test/
 ---
 
 ## Key design decisions (permanent)
-- **Two-phase execution** — `evaluate!` outputs current state, `commit_state!` advances it. Matches Simulink's Output/Update method split.
+- **Three-phase block lifecycle** — `initialize!` resets state to initial conditions; `evaluate!` outputs current state; `commit_state!` advances state. Matches Simulink's Initialize/Output/Update method split. All 20 blocks have explicit `initialize!` methods; stateless blocks return `nothing`. `IntegratorBlock` and `UnitDelayBlock` store their original `x0` field so `initialize!` resets to the user-specified IC, not zero. `TransferFnBlock`/`StateSpaceBlock` also reset `dt_cached = -1` to force ZOH re-discretization. `simulate(; continue_sim=true)` skips initialization to resume from the previous run's final state.
 - **Topological sort at simulation start** — blocks always evaluated upstream-first.
 - **`name::String` on all blocks** — used as `SimResult.data` key prefix and MTK symbolic variable name.
 - **`SumBlock` takes a signs string** — `"+-"` enables subtraction for feedback error signals.
@@ -218,10 +219,10 @@ test/
 ```
 
 ### Additional registry checklist
-- `[compat]` entries for all direct deps (GLMakie, JSON3, DifferentialEquations, ModelingToolkit)
+- `[compat]` entries for all direct deps (GLMakie, JSON3, DifferentialEquations, ModelingToolkit) — **DONE**
 - Public API docstrings on `draw_diagram`, `simulate`, `simulate_ode`, all block constructors, `add_block!`, `connect!`, `disconnect!`, `remove_block!`
 - Semantic versioning: bump to `0.2.0` once tests pass
-- `LICENSE` file (MIT recommended for Julia ecosystem packages)
+- `LICENSE` file (MIT recommended for Julia ecosystem packages) — **DONE**
 - `README.md` — DONE (install instructions, usage examples, full block catalog)
 
 ---

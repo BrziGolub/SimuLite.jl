@@ -3,7 +3,7 @@ module BlocksSinks
 using ..Types
 using ..BlocksCommon
 
-import ..BlocksAPI: evaluate!
+import ..BlocksAPI: evaluate!, initialize!
 
 export ScopeBlock, WorkspaceBlock, TerminatorBlock
 
@@ -29,6 +29,7 @@ function ScopeBlock(; title="Scope", n_ports=1,
 end
 
 evaluate!(::ScopeBlock, ::Any, ::Any) = nothing  # data read from SimResult via upstream connections
+initialize!(::ScopeBlock) = nothing
 
 # ------------------------------------------
 
@@ -54,6 +55,8 @@ function evaluate!(b::WorkspaceBlock, _t, _dt)
     b.base.outputs[:out].value = b.base.inputs[:in].value
 end
 
+initialize!(::WorkspaceBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct TerminatorBlock <: AbstractBlock
@@ -74,5 +77,6 @@ function TerminatorBlock(; name="term_$(_next_id())", position=(0.0, 0.0))
 end
 
 evaluate!(::TerminatorBlock, ::Any, ::Any) = nothing
+initialize!(::TerminatorBlock) = nothing
 
 end

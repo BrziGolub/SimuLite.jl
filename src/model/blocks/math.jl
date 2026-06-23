@@ -5,7 +5,7 @@ using ..BlocksCommon
 import ControlSystems
 using LinearAlgebra
 
-import ..BlocksAPI: evaluate!, commit_state!
+import ..BlocksAPI: evaluate!, commit_state!, initialize!
 
 export GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
        ProductBlock, SaturationBlock, AbsBlock,
@@ -29,6 +29,8 @@ end
 function evaluate!(b::GainBlock, _t, _dt)
     b.base.outputs[:out].value = b.k * b.base.inputs[:in].value
 end
+
+initialize!(::GainBlock) = nothing
 
 # ------------------------------------------
 
@@ -60,10 +62,13 @@ function evaluate!(b::SumBlock, _t, _dt)
     b.base.outputs[:out].value = result
 end
 
+initialize!(::SumBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct IntegratorBlock <: AbstractBlock
     base::BlockBase
+    x0::Float64
     state::Float64
     next_state::Float64
     name::String
@@ -72,7 +77,7 @@ end
 
 function IntegratorBlock(x0=0.0; name="int_$(_next_id())", position=(0.0, 0.0))
     base = BlockBase([:in], [:out])
-    IntegratorBlock(base, x0, x0, name, position)
+    IntegratorBlock(base, x0, x0, x0, name, position)
 end
 
 function evaluate!(b::IntegratorBlock, _t, dt)
@@ -85,10 +90,16 @@ function commit_state!(b::IntegratorBlock)
     b.state = b.next_state
 end
 
+function initialize!(b::IntegratorBlock)
+    b.state = b.x0
+    b.next_state = b.x0
+end
+
 # ------------------------------------------
 
 mutable struct UnitDelayBlock <: AbstractBlock
     base::BlockBase
+    x0::Float64
     state::Float64
     next_state::Float64
     name::String
@@ -97,7 +108,7 @@ end
 
 function UnitDelayBlock(x0=0.0; name="delay_$(_next_id())", position=(0.0, 0.0))
     base = BlockBase([:in], [:out])
-    UnitDelayBlock(base, x0, x0, name, position)
+    UnitDelayBlock(base, x0, x0, x0, name, position)
 end
 
 function evaluate!(b::UnitDelayBlock, _t, _dt)
@@ -107,6 +118,11 @@ end
 
 function commit_state!(b::UnitDelayBlock)
     b.state = b.next_state
+end
+
+function initialize!(b::UnitDelayBlock)
+    b.state = b.x0
+    b.next_state = b.x0
 end
 
 # ------------------------------------------
@@ -134,6 +150,8 @@ function evaluate!(b::ProductBlock, _t, _dt)
     b.base.outputs[:out].value = result
 end
 
+initialize!(::ProductBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct SaturationBlock <: AbstractBlock
@@ -154,6 +172,8 @@ function evaluate!(b::SaturationBlock, _t, _dt)
     b.base.outputs[:out].value = clamp(b.base.inputs[:in].value, b.lower, b.upper)
 end
 
+initialize!(::SaturationBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct AbsBlock <: AbstractBlock
@@ -170,6 +190,8 @@ end
 function evaluate!(b::AbsBlock, _t, _dt)
     b.base.outputs[:out].value = abs(b.base.inputs[:in].value)
 end
+
+initialize!(::AbsBlock) = nothing
 
 # ------------------------------------------
 
@@ -195,6 +217,11 @@ end
 
 function commit_state!(b::DerivativeBlock)
     b.state = b.next_state
+end
+
+function initialize!(b::DerivativeBlock)
+    b.state = 0.0
+    b.next_state = 0.0
 end
 
 # ------------------------------------------
@@ -238,6 +265,13 @@ function commit_state!(b::PIDBlock)
     b.fd = b.fd_next
 end
 
+function initialize!(b::PIDBlock)
+    b.xi = 0.0
+    b.fd = 0.0
+    b.xi_next = 0.0
+    b.fd_next = 0.0
+end
+
 # ------------------------------------------
 
 mutable struct LookupTable1DBlock <: AbstractBlock
@@ -270,6 +304,8 @@ function evaluate!(b::LookupTable1DBlock, _t, _dt)
     end
     b.base.outputs[:out].value = y
 end
+
+initialize!(::LookupTable1DBlock) = nothing
 
 # ------------------------------------------
 # ZOH discretization helper (Van Loan augmented-matrix method)
@@ -338,6 +374,12 @@ function commit_state!(b::TransferFnBlock)
     b.x .= b.x_next
 end
 
+function initialize!(b::TransferFnBlock)
+    fill!(b.x, 0.0)
+    fill!(b.x_next, 0.0)
+    b.dt_cached = -1.0
+end
+
 # ------------------------------------------
 # StateSpaceBlock
 # Continuous-time SISO state-space: ẋ = A·x + B·u, y = C·x + D·u.
@@ -385,6 +427,12 @@ end
 
 function commit_state!(b::StateSpaceBlock)
     b.x .= b.x_next
+end
+
+function initialize!(b::StateSpaceBlock)
+    fill!(b.x, 0.0)
+    fill!(b.x_next, 0.0)
+    b.dt_cached = -1.0
 end
 
 end

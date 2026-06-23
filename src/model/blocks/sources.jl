@@ -3,7 +3,7 @@ module BlocksSources
 using ..Types
 using ..BlocksCommon
 
-import ..BlocksAPI: evaluate!
+import ..BlocksAPI: evaluate!, initialize!
 
 export ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
 
@@ -24,6 +24,8 @@ end
 function evaluate!(b::ConstantBlock, _t, _dt)
     b.base.outputs[:out].value = b.value
 end
+
+initialize!(::ConstantBlock) = nothing
 
 # ------------------------------------------
 
@@ -50,6 +52,8 @@ end
 function evaluate!(b::StepBlock, t, _dt)
     b.base.outputs[:out].value = t >= b.step_time ? b.after : b.before
 end
+
+initialize!(::StepBlock) = nothing
 
 # ------------------------------------------
 
@@ -79,6 +83,8 @@ function evaluate!(b::SineBlock, t, _dt)
         b.amplitude * sin(2π * b.frequency * t + b.phase) + b.offset
 end
 
+initialize!(::SineBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct RampBlock <: AbstractBlock
@@ -101,6 +107,8 @@ function evaluate!(b::RampBlock, t, _dt)
         b.bias + (t >= b.start_time ? b.slope * (t - b.start_time) : 0.0)
 end
 
+initialize!(::RampBlock) = nothing
+
 # ------------------------------------------
 
 mutable struct ClockBlock <: AbstractBlock
@@ -117,5 +125,7 @@ end
 function evaluate!(b::ClockBlock, t, _dt)
     b.base.outputs[:out].value = t
 end
+
+initialize!(::ClockBlock) = nothing
 
 end

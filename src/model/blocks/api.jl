@@ -1,13 +1,15 @@
 module BlocksAPI
 
-export evaluate!, commit_state!, input_ports, output_ports
+export evaluate!, commit_state!, initialize!, input_ports, output_ports
 
 function evaluate!(block, t, dt)
     error("evaluate! not implemented for $(typeof(block))")
 end
 
-function commit_state!(block)
-    # default no-op
+function commit_state!(_)
+end
+
+function initialize!(_)
 end
 
 """
