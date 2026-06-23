@@ -143,15 +143,16 @@ end
 
 # ── Block and connection draw helpers ─────────────────────────────────────────
 
-function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_type)
+function _setup_block!(ax, block, block_centers, block_strokes, block_heights, port_pos, port_type)
     cx, cy = block.position
-    bh = _block_height(block)
-    c  = Observable(Point2f(cx, cy))
+    bh_obs = Observable(_block_height(block))
+    c      = Observable(Point2f(cx, cy))
 
     sym_text, bdr_color, icon_bg = _block_icon(block)
     sc = Observable{Any}(bdr_color)
-    block_centers[block] = c
-    block_strokes[block] = sc
+    block_centers[block]  = c
+    block_strokes[block]  = sc
+    block_heights[block]  = bh_obs
 
     iports = input_ports(block)
     oports = output_ports(block)
@@ -159,53 +160,53 @@ function _setup_block!(ax, block, block_centers, block_strokes, port_pos, port_t
 
     for (i, p) in enumerate(iports)
         frac = Float64(i) / (ni + 1) - 0.5
-        port_pos[(block, p)]  = @lift Point2f($c[1] - BLOCK_W/2, $c[2] + bh * frac)
+        port_pos[(block, p)]  = @lift Point2f($c[1] - BLOCK_W/2, $c[2] + $bh_obs * frac)
         port_type[(block, p)] = :input
     end
     for (i, p) in enumerate(oports)
         frac = Float64(i) / (no + 1) - 0.5
-        port_pos[(block, p)]  = @lift Point2f($c[1] + BLOCK_W/2, $c[2] + bh * frac)
+        port_pos[(block, p)]  = @lift Point2f($c[1] + BLOCK_W/2, $c[2] + $bh_obs * frac)
         port_type[(block, p)] = :output
     end
 
     strip_pts = @lift Point2f[
-        ($c[1] - BLOCK_W/2, $c[2] - bh/2),
-        ($c[1] + BLOCK_W/2, $c[2] - bh/2),
-        ($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
-        ($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        ($c[1] - BLOCK_W/2, $c[2] - $bh_obs/2),
+        ($c[1] + BLOCK_W/2, $c[2] - $bh_obs/2),
+        ($c[1] + BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
+        ($c[1] - BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
     ]
     strip = poly!(ax, strip_pts; color = :white, strokewidth = 0)
 
     icon_pts = @lift Point2f[
-        ($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
-        ($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
-        ($c[1] + BLOCK_W/2, $c[2] + bh/2),
-        ($c[1] - BLOCK_W/2, $c[2] + bh/2),
+        ($c[1] - BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
+        ($c[1] + BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
+        ($c[1] + BLOCK_W/2, $c[2] + $bh_obs/2),
+        ($c[1] - BLOCK_W/2, $c[2] + $bh_obs/2),
     ]
     icon = poly!(ax, icon_pts; color = icon_bg, strokewidth = 0)
 
     div_pts = @lift [
-        Point2f($c[1] - BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
-        Point2f($c[1] + BLOCK_W/2, $c[2] - bh/2 + bh*STRIP_FRAC),
+        Point2f($c[1] - BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
+        Point2f($c[1] + BLOCK_W/2, $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC),
     ]
     divider = lines!(ax, div_pts; color = bdr_color, linewidth = 0.8)
 
     border_pts = @lift Point2f[
-        ($c[1] - BLOCK_W/2, $c[2] - bh/2),
-        ($c[1] + BLOCK_W/2, $c[2] - bh/2),
-        ($c[1] + BLOCK_W/2, $c[2] + bh/2),
-        ($c[1] - BLOCK_W/2, $c[2] + bh/2),
+        ($c[1] - BLOCK_W/2, $c[2] - $bh_obs/2),
+        ($c[1] + BLOCK_W/2, $c[2] - $bh_obs/2),
+        ($c[1] + BLOCK_W/2, $c[2] + $bh_obs/2),
+        ($c[1] - BLOCK_W/2, $c[2] + $bh_obs/2),
     ]
     border = poly!(ax, border_pts;
         color = (:white, 0f0), strokecolor = sc, strokewidth = 2)
 
     icon_center_y = @lift Point2f($c[1],
-        $c[2] - bh/2 + bh*(STRIP_FRAC + (1f0 - STRIP_FRAC)/2f0))
+        $c[2] - $bh_obs/2 + $bh_obs*(STRIP_FRAC + (1f0 - STRIP_FRAC)/2f0))
     sym = text!(ax, @lift([$icon_center_y]);
         text = [sym_text], align = (:center, :center),
         fontsize = 15, color = bdr_color)
 
-    strip_center_y = @lift Point2f($c[1], $c[2] - bh/2 + bh*STRIP_FRAC/2f0)
+    strip_center_y = @lift Point2f($c[1], $c[2] - $bh_obs/2 + $bh_obs*STRIP_FRAC/2f0)
     label = text!(ax, @lift([$strip_center_y]);
         text = [block.name], align = (:center, :center),
         fontsize = 10, color = RGBf(0.20, 0.20, 0.20))
@@ -243,8 +244,8 @@ function _add_connection_visual!(ax, conn, port_pos)
 end
 
 function _delete_block!(ax, diagram, block,
-                        block_centers, block_strokes, port_pos, port_type,
-                        block_visuals, conn_visuals)
+                        block_centers, block_strokes, block_heights,
+                        port_pos, port_type, block_visuals, conn_visuals)
     affected = filter(c -> c.src_block === block || c.dst_block === block,
                       diagram.connections)
     for conn in affected
@@ -273,6 +274,67 @@ function _delete_block!(ax, diagram, block,
     delete!(block_visuals, block)
     delete!(block_centers, block)
     delete!(block_strokes, block)
+    delete!(block_heights, block)
+end
+
+# ── Port reconfiguration (SumBlock / ScopeBlock) ─────────────────────────────
+
+function _reconfigure_inputs!(ax, block, new_input_syms,
+                               diagram, block_centers, block_heights,
+                               port_pos, port_type, conn_visuals, block_visuals)
+    old_syms     = input_ports(block)
+    removed_syms = setdiff(Set(old_syms), Set(new_input_syms))
+
+    # Delete visuals for ALL input-bound connections; re-create surviving ones after.
+    affected_conns  = filter(c -> c.dst_block === block, diagram.connections)
+    surviving_conns = Connection[]
+    for conn in affected_conns
+        cv = get(conn_visuals, conn, nothing)
+        if cv !== nothing
+            delete!(ax, cv.curve)
+            delete!(ax, cv.arrow)
+            delete!(conn_visuals, conn)
+        end
+        if conn.dst_port in removed_syms
+            disconnect!(diagram, conn.src_block, conn.src_port, block, conn.dst_port)
+        else
+            push!(surviving_conns, conn)
+        end
+    end
+
+    # Remove old input scatter plots (stored first in bv.ports).
+    bv = block_visuals[block]
+    n_old = length(old_syms)
+    for i in 1:n_old; delete!(ax, bv.ports[i]); end
+    bv.ports = bv.ports[n_old+1:end]   # keep only output plots
+
+    for p in old_syms
+        delete!(port_pos,  (block, p))
+        delete!(port_type, (block, p))
+    end
+
+    # Rebuild block inputs and update reactive height.
+    block.base.inputs = Dict(sym => Port(sym, 0.0) for sym in new_input_syms)
+    bh_obs = block_heights[block]
+    bh_obs[] = _block_height(block)
+
+    # Create new input port observables and scatter plots.
+    c  = block_centers[block]
+    ni = length(new_input_syms)
+    new_plots = Any[]
+    for (i, p) in enumerate(new_input_syms)
+        frac = Float64(i) / (ni + 1) - 0.5
+        port_pos[(block, p)]  = @lift Point2f($c[1] - BLOCK_W/2, $c[2] + $bh_obs * frac)
+        port_type[(block, p)] = :input
+        push!(new_plots, scatter!(ax, @lift([$(port_pos[(block, p)])]);
+            color = RGBf(0.25, 0.45, 0.75), markersize = PORT_PX))
+    end
+    bv.ports = vcat(new_plots, bv.ports)
+
+    # Recreate connection visuals for surviving connections.
+    for conn in surviving_conns
+        conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+    end
 end
 
 # ── Save / Load ───────────────────────────────────────────────────────────────
@@ -473,7 +535,9 @@ end
 
 # ── Properties window ─────────────────────────────────────────────────────────
 
-function _open_props_window!(block, block_visuals, prop_screens)
+function _open_props_window!(block, block_visuals, prop_screens,
+                             ax, diagram, block_centers, block_heights,
+                             port_pos, port_type, conn_visuals)
     if haskey(prop_screens, block)
         prev = prop_screens[block]
         try; prev.window_open[] && close(prev); catch _; end
@@ -546,16 +610,28 @@ function _open_props_window!(block, block_visuals, prop_screens)
         add_field!("k", string(block.k),
             s -> block.k = parse(Float64, s))
     elseif block isa SumBlock
-        add_field!("Signs", block.signs, s -> block.signs = s)
+        add_field!("Signs", block.signs, s -> begin
+            all(c -> c == '+' || c == '-', s) || return
+            isempty(s) && return
+            if length(s) != length(block.signs)
+                new_syms = [Symbol("in$i") for i in 1:length(s)]
+                _reconfigure_inputs!(ax, block, new_syms, diagram,
+                    block_centers, block_heights, port_pos, port_type,
+                    conn_visuals, block_visuals)
+            end
+            block.signs = s
+        end)
     elseif block isa IntegratorBlock
-        add_field!("Init state", string(block.state), s -> begin
+        add_field!("x0 (init)", string(block.x0), s -> begin
             v = parse(Float64, s)
+            block.x0         = v
             block.state      = v
             block.next_state = v
         end)
     elseif block isa UnitDelayBlock
-        add_field!("Init state", string(block.state), s -> begin
+        add_field!("x0 (init)", string(block.x0), s -> begin
             v = parse(Float64, s)
+            block.x0         = v
             block.state      = v
             block.next_state = v
         end)
@@ -580,6 +656,18 @@ function _open_props_window!(block, block_visuals, prop_screens)
             s -> block.out_min = parse(Float64, s))
         add_field!("Out max", string(block.out_max),
             s -> block.out_max = parse(Float64, s))
+    elseif block isa ScopeBlock
+        add_field!("Title", block.title, s -> block.title = s)
+        add_field!("Ports (1–3)", string(block.n_ports), s -> begin
+            n = clamp(parse(Int, s), 1, 3)
+            if n != block.n_ports
+                new_syms = [Symbol("in$i") for i in 1:n]
+                _reconfigure_inputs!(ax, block, new_syms, diagram,
+                    block_centers, block_heights, port_pos, port_type,
+                    conn_visuals, block_visuals)
+                block.n_ports = n
+            end
+        end)
     elseif block isa ProductBlock
         ops_str = join(block.ops, ", ")
         add_info!("Ports: $(length(block.ops))  ops: $ops_str")
@@ -627,7 +715,7 @@ Interactions:
 - **Output port** (red) → **Input port** (blue) to wire
 - **Single-click block** — select (blue border); Delete to remove
 - **Double-click block** — open floating Properties window to edit parameters
-- **Double-click Scope** — open result plot window (run first)
+- **Double-click Scope** — open result plot window (run first); **Ctrl+double-click** to edit Scope properties
 - **Escape** — cancel wire / deselect
 - **▶ Run** — simulate and show signal plots
 - **New / Clear** — remove all blocks and connections
@@ -725,6 +813,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     # ── State dicts ───────────────────────────────────────────────────────────
     block_centers  = Dict{AbstractBlock, Observable{Point2f}}()
     block_strokes  = Dict{AbstractBlock, Observable{Any}}()
+    block_heights  = Dict{AbstractBlock, Observable{Float64}}()
     port_pos       = Dict{Tuple{Any, Symbol}, Observable{Point2f}}()
     port_type      = Dict{Tuple{Any, Symbol}, Symbol}()
     block_visuals  = Dict{AbstractBlock, BlockVisual}()
@@ -736,7 +825,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     # ── Draw existing diagram ─────────────────────────────────────────────────
     for block in diagram.blocks
         block_visuals[block] = _setup_block!(ax, block,
-            block_centers, block_strokes, port_pos, port_type)
+            block_centers, block_strokes, block_heights, port_pos, port_type)
     end
     for conn in diagram.connections
         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
@@ -763,8 +852,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         end
         for block in copy(diagram.blocks)
             _delete_block!(ax, diagram, block,
-                block_centers, block_strokes, port_pos, port_type,
-                block_visuals, conn_visuals)
+                block_centers, block_strokes, block_heights,
+                port_pos, port_type, block_visuals, conn_visuals)
         end
         for (_, screen) in scope_screens
             try; screen.window_open[] && close(screen); catch _; end
@@ -867,17 +956,21 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             end
 
         elseif event.type == MouseEventTypes.leftdoubleclick
+            ctrl_held = Keyboard.left_control in events(ax.scene).keyboardstate ||
+                        Keyboard.right_control in events(ax.scene).keyboardstate
             for block in reverse(diagram.blocks)
                 if _hit_block(block_centers[block][], pos, _block_height(block))
-                    if block isa ScopeBlock
+                    if block isa ScopeBlock && !ctrl_held
                         if last_result[] !== nothing
                             _open_scope_window!(block, last_result[], diagram, scope_screens)
                             status[] = "Scope '$(block.title)' opened"
                         else
-                            status[] = "Run the simulation first, then double-click a Scope block"
+                            status[] = "Run the simulation first — Ctrl+double-click to edit properties"
                         end
                     else
-                        _open_props_window!(block, block_visuals, prop_screens)
+                        _open_props_window!(block, block_visuals, prop_screens,
+                            ax, diagram, block_centers, block_heights,
+                            port_pos, port_type, conn_visuals)
                         status[] = "Properties opened for $(block.name)"
                     end
                     break
@@ -917,8 +1010,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 block = selected[]
                 selected[] = nothing
                 _delete_block!(ax, diagram, block,
-                    block_centers, block_strokes, port_pos, port_type,
-                    block_visuals, conn_visuals)
+                    block_centers, block_strokes, block_heights,
+                    port_pos, port_type, block_visuals, conn_visuals)
                 status[] = "Block deleted"
             end
         end
@@ -940,8 +1033,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     ]
     math_pal = [
         ("▷",    _BLUE_BORDER, "Gain",           () -> GainBlock(1.0)),
-        ("Σ",    _BLUE_BORDER, "Sum  ++",        () -> SumBlock("++")),
-        ("Σ",    _BLUE_BORDER, "Sum  +-",        () -> SumBlock("+-")),
+        ("Σ",    _BLUE_BORDER, "Sum",             () -> SumBlock("++")),
         ("∫",    _BLUE_BORDER, "Integrator",     () -> IntegratorBlock(0.0)),
         ("z⁻¹",  _BLUE_BORDER, "Unit Delay",     () -> UnitDelayBlock(0.0)),
         ("×",    _BLUE_BORDER, "Product ×2",     () -> ProductBlock([:mul, :mul])),
@@ -955,8 +1047,6 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     ]
     sinks_pal = [
         ("∿",    _GRNN_BORDER, "Scope",          () -> ScopeBlock()),
-        ("∿",    _GRNN_BORDER, "Scope ×2",       () -> ScopeBlock(n_ports = 2)),
-        ("∿",    _GRNN_BORDER, "Scope ×3",       () -> ScopeBlock(n_ports = 3)),
         ("ws",   _GRNN_BORDER, "Workspace",      () -> WorkspaceBlock()),
         ("▪",    _GRNN_BORDER, "Terminator",     () -> TerminatorBlock()),
     ]
@@ -988,15 +1078,33 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 return
             end
             block_visuals[block] = _setup_block!(ax, block,
-                block_centers, block_strokes, port_pos, port_type)
+                block_centers, block_strokes, block_heights, port_pos, port_type)
             status[] = "Added $(block.name) — drag to position"
         end
         push!(pal_items[], chip)
         push!(pal_items[], btn)
     end
 
+    function _pal_category!(label_text, cat_target)
+        r = next_content_row[]
+        next_content_row[] += 1
+        btn = Button(palette_grid[r, 1:2]; label = label_text,
+            tellwidth = true, fontsize = 12)
+        on(btn.clicks) do _
+            active_cat[] = cat_target
+            _build_pal!(cat_target, "")
+        end
+        push!(pal_items[], btn)
+    end
+
     function _build_pal!(cat_str, search_txt)
         clear_pal!()
+        if cat_str == "All" && isempty(search_txt)
+            _pal_category!("Sources",  "Sources")
+            _pal_category!("Math",     "Math")
+            _pal_category!("Sinks",    "Sinks")
+            return
+        end
         items = if cat_str == "Sources"
             sources_pal
         elseif cat_str == "Math"
@@ -1077,7 +1185,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                                        b_data["params"])
                 add_block!(diagram, b)
                 block_visuals[b] = _setup_block!(ax, b,
-                    block_centers, block_strokes, port_pos, port_type)
+                    block_centers, block_strokes, block_heights, port_pos, port_type)
                 name_to_block[b.name] = b
             end
             for c_data in data["connections"]

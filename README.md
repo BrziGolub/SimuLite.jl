@@ -7,7 +7,7 @@ Built as a university thesis project.
 
 - **Interactive GUI** — drag-and-drop canvas, tabbed block palette, bezier wires, zoom/pan
 - **Double-click to edit** — every block opens a floating properties window on double-click
-- **18 built-in blocks** across sources, math, and sinks categories
+- **20 built-in blocks** across sources, math, and sinks categories
 - **Two simulation backends** — fixed-step discrete runner and symbolic ODE compiler via ModelingToolkit
 - **Save / load** — diagrams serialized to JSON
 - **Scope windows** — dedicated plot window per Scope block, opened after simulation
@@ -50,17 +50,18 @@ That's it. A full-screen window opens with the block palette on the left and the
 
 | Action | How |
 |---|---|
-| Add block | Click a block button in the palette (Sources / Math / Sinks tabs) |
+| Add block | Click **Sources / Math / Sinks** in the palette → click a block button |
 | Move block | Left-click drag |
 | Select block | Left-click → blue border; press **Delete** to remove |
 | Edit parameters | Double-click any block → floating Properties window |
+| Edit Scope properties | **Ctrl + double-click** a Scope block |
 | Draw wire | Click an output port (red circle) → click an input port (blue circle) |
 | Cancel wire | **Escape** |
 | Delete wire | Click the wire to select it (turns orange) → **Delete** |
 | Run simulation | Click **▶ Run** in the toolbar |
 | View scope | Double-click a Scope block after running |
-| Save diagram | File tab → enter filename → **Save** |
-| Load diagram | File tab → enter filename → **Load** |
+| Save diagram | Enter filename in toolbar textbox → click **Save** |
+| Load diagram | Enter filename in toolbar textbox → click **Load** |
 | Zoom / pan canvas | Scroll to zoom; double-click empty canvas to reset view |
 | Clear all | Click **Clear** — closes all open windows and resets the canvas |
 
@@ -120,6 +121,8 @@ result = simulate(d)
 | `DerivativeBlock` | `DerivativeBlock(; N)` | Filtered derivative `H(s)=Ns/(s+N)` |
 | `PIDBlock` | `PIDBlock(; Kp, Ki, Kd, N, out_min, out_max)` | Full PID with derivative filter and output clamp |
 | `LookupTable1DBlock` | `LookupTable1DBlock(bp, vals)` | Linear interpolation, clamp extrapolation |
+| `TransferFnBlock` | `TransferFnBlock(num, den)` | Continuous SISO transfer function; ZOH-discretized |
+| `StateSpaceBlock` | `StateSpaceBlock(A, B, C, D)` | Continuous state-space model; ZOH-discretized |
 
 ### Sinks
 
@@ -153,7 +156,7 @@ src/
     types.jl           — core types: Port, AbstractBlock, Connection, SimConfig, BlockDiagram, SimResult
     diagram.jl         — add_block!, connect!, disconnect!, remove_block!
     blocks/
-      api.jl           — evaluate!, commit_state!, input_ports, output_ports
+      api.jl           — evaluate!, commit_state!, initialize!, input_ports, output_ports
       common.jl        — BlockBase
       sources.jl       — ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
       math.jl          — GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,

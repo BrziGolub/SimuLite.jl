@@ -102,6 +102,9 @@ test/
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
 - **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
 - **Icon-card block visual style** (wireframe Style C) — each block is split into two zones: top ~70% is a tinted icon zone with the type symbol (`⎍`, `Σ`, `PID`, `∿`, …), bottom 30% is a white name strip. Three category border colors: blue (`_BLUE_BORDER`) for Sources + most Math, amber (`_AMGR_BORDER`) for PID, green (`_GRNN_BORDER`) for Sinks. Selection uses bright dodgerblue `_SEL_COLOR`; deselect restores the block's natural `border_color` stored in `BlockVisual`.
+- **Reactive block height** — `_block_height(block)` is wrapped in `Observable{Float64}` per block (`block_heights` dict); all geometry and port-position `@lift`s reference `$bh_obs` so the block resizes live when port count changes.
+- **Single palette entry + reconfigurable ports** — `SumBlock` and `ScopeBlock` have one palette button each (default `"++"` / 1 port). Double-clicking their Properties window reconfigures port count on the fly: `_reconfigure_inputs!` tears down old port Observables/scatter plots and connection visuals for removed ports, rebuilds `block.base.inputs`, updates `bh_obs`, and recreates surviving connection visuals against the new port Observables. `ScopeBlock` properties are accessed via **Ctrl+double-click** (plain double-click opens the scope result window).
+- **Block Library group-first navigation** — default ("All") view shows three category buttons (Sources / Math / Sinks); clicking one drills into that category. Category dropdown and search still work normally for direct access.
 - **Blue wires** — connections drawn in `_WIRE_COLOR = RGBf(0.19, 0.43, 0.69)` (linewidth 1.8); turn orange `_ORA_COLOR` on selection, restored on deselect.
 - **Dot grid canvas** — 825 scatter dots at 0.5-unit spacing on warm-white background `RGBf(0.98, 0.98, 0.97)`; dots zoom with the canvas naturally.
 - **Single-row toolbar** (Section 5 wireframe style) — `New | Save | Load [filename]` for file ops, `▶ Run | ■ Stop | ✕ Clear` for simulation, `t₀ [txt] tstop [txt] Δt [txt]` for timing. No separate menubar strip. File tab removed from palette.
@@ -137,10 +140,10 @@ Opening the GUI shows a 3-row window sized to 92 × 88% of the primary monitor:
 ### Interactions implemented
 | Action | How |
 |---|---|
-| Add block | Click block button in palette tab → placed at canvas centre |
+| Add block | Click Sources / Math / Sinks in palette → click block button → placed at canvas centre |
 | Move block | Drag with left mouse; bezier wires follow live |
 | Select block | Left click → blue border |
-| Edit params | Double-click block → floating Properties window opens |
+| Edit params | Double-click block → floating Properties window opens; **Ctrl+double-click** for ScopeBlock |
 | Rename block | Edit "Name" field in Properties window → canvas label updates live |
 | Draw connection | Click output port (red) → click input port (blue) |
 | Delete connection | Click wire → highlights orange → press Delete |
@@ -159,12 +162,8 @@ Opening the GUI shows a 3-row window sized to 92 × 88% of the primary monitor:
 
 ## Known bugs / open issues
 
-### Palette widget squashing *(likely fixed — needs confirmation)*
-Previously: buttons/inputs sometimes rendered at near-zero height when switching tabs.
-Session 4 changed the row tracking from `length(pal_items[]) + 5` (accumulated offset) to
-`next_content_row[]` (explicit counter, reset to 7 on `clear_pal!`). This eliminates the ghost-row
-accumulation that was the suspected root cause. `trim!(palette_grid)` is still called.
-**Status**: needs user confirmation that squashing no longer occurs after tab switches.
+### Palette widget squashing *(superseded)*
+The old multi-entry palette (18+ rows always visible) has been replaced with group-first navigation — the default view shows only 3 category buttons, so squashing of a long list is no longer a concern.
 
 ---
 
