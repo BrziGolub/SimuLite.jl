@@ -221,7 +221,7 @@ test/
 ### Additional registry checklist
 - `[compat]` entries for all direct deps (GLMakie, JSON3, DifferentialEquations, ModelingToolkit) — **DONE**
 - Public API docstrings on `draw_diagram`, `simulate`, `simulate_ode`, all block constructors, `add_block!`, `connect!`, `disconnect!`, `remove_block!`
-- Semantic versioning: bump to `0.2.0` once tests pass
+- Semantic versioning: bumped to `0.2.0` — **DONE**
 - `LICENSE` file (MIT recommended for Julia ecosystem packages) — **DONE**
 - `README.md` — DONE (install instructions, usage examples, full block catalog)
 
