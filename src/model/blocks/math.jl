@@ -2,12 +2,15 @@ module BlocksMath
 
 using ..Types
 using ..BlocksCommon
+import ControlSystems
+using LinearAlgebra
 
 import ..BlocksAPI: evaluate!, commit_state!
 
 export GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
        ProductBlock, SaturationBlock, AbsBlock,
-       DerivativeBlock, PIDBlock, LookupTable1DBlock
+       DerivativeBlock, PIDBlock, LookupTable1DBlock,
+       TransferFnBlock, StateSpaceBlock
 
 # ------------------------------------------
 
@@ -266,6 +269,122 @@ function evaluate!(b::LookupTable1DBlock, _t, _dt)
         v[i-1] + t * (v[i] - v[i-1])
     end
     b.base.outputs[:out].value = y
+end
+
+# ------------------------------------------
+# ZOH discretization helper (Van Loan augmented-matrix method)
+# Computes Φ = expm(A·dt) and Γ = ∫₀ᵈᵗ expm(A·s)·B ds
+# by forming the (n+1)×(n+1) augmented matrix [A B; 0 0]·dt.
+# ------------------------------------------
+function _zoh_discretize(A::Matrix{Float64}, B::Vector{Float64}, dt::Float64)
+    n = size(A, 1)
+    M = zeros(n + 1, n + 1)
+    M[1:n, 1:n] = A
+    M[1:n, n+1] = B
+    eM = exp(M * dt)
+    eM[1:n, 1:n], eM[1:n, n+1]
+end
+
+# ------------------------------------------
+# TransferFnBlock
+# Continuous-time SISO transfer function H(s) = num(s)/den(s).
+# Coefficients are highest-power-first (ControlSystems.jl convention).
+# Uses ControlSystems.jl for minimal-realization TF→SS conversion,
+# then ZOH-discretizes lazily on the first evaluate! call.
+# ------------------------------------------
+
+mutable struct TransferFnBlock <: AbstractBlock
+    base      :: BlockBase
+    num       :: Vector{Float64}
+    den       :: Vector{Float64}
+    A_c       :: Matrix{Float64}
+    B_c       :: Vector{Float64}
+    C_c       :: Vector{Float64}
+    D_c       :: Float64
+    x         :: Vector{Float64}
+    x_next    :: Vector{Float64}
+    Φ         :: Matrix{Float64}
+    Γ         :: Vector{Float64}
+    dt_cached :: Float64
+    name      :: String
+    position  :: Tuple{Float64, Float64}
+end
+
+function TransferFnBlock(num::Vector{Float64}, den::Vector{Float64};
+                          name = "tf_$(_next_id())", position = (0.0, 0.0))
+    sys_ss = ControlSystems.ss(ControlSystems.tf(num, den))
+    A_c = Float64.(sys_ss.A)
+    B_c = Float64.(vec(sys_ss.B))
+    C_c = Float64.(vec(sys_ss.C))
+    D_c = Float64(sys_ss.D[1, 1])
+    n   = size(A_c, 1)
+    base = BlockBase([:in], [:out])
+    TransferFnBlock(base, num, den, A_c, B_c, C_c, D_c,
+                    zeros(n), zeros(n), zeros(n, n), zeros(n), -1.0,
+                    name, position)
+end
+
+function evaluate!(b::TransferFnBlock, _t, dt)
+    if !(b.dt_cached ≈ dt)
+        b.Φ, b.Γ = _zoh_discretize(b.A_c, b.B_c, dt)
+        b.dt_cached = dt
+    end
+    u = b.base.inputs[:in].value
+    b.base.outputs[:out].value = dot(b.C_c, b.x) + b.D_c * u
+    b.x_next = b.Φ * b.x + b.Γ * u
+end
+
+function commit_state!(b::TransferFnBlock)
+    b.x .= b.x_next
+end
+
+# ------------------------------------------
+# StateSpaceBlock
+# Continuous-time SISO state-space: ẋ = A·x + B·u, y = C·x + D·u.
+# ZOH-discretized lazily on first evaluate! call.
+# ------------------------------------------
+
+mutable struct StateSpaceBlock <: AbstractBlock
+    base      :: BlockBase
+    A_c       :: Matrix{Float64}
+    B_c       :: Vector{Float64}
+    C_c       :: Vector{Float64}
+    D_c       :: Float64
+    x         :: Vector{Float64}
+    x_next    :: Vector{Float64}
+    Φ         :: Matrix{Float64}
+    Γ         :: Vector{Float64}
+    dt_cached :: Float64
+    name      :: String
+    position  :: Tuple{Float64, Float64}
+end
+
+function StateSpaceBlock(A::Matrix{Float64},
+                          B::Union{Matrix{Float64}, Vector{Float64}},
+                          C::Union{Matrix{Float64}, Vector{Float64}},
+                          D::Float64 = 0.0;
+                          name = "ss_$(_next_id())", position = (0.0, 0.0))
+    n   = size(A, 1)
+    b_v = ndims(B) == 2 ? Float64.(vec(B)) : Float64.(B)
+    c_v = ndims(C) == 2 ? Float64.(vec(C)) : Float64.(C)
+    base = BlockBase([:in], [:out])
+    StateSpaceBlock(base, A, b_v, c_v, D,
+                    zeros(n), zeros(n), zeros(n, n), zeros(n), -1.0,
+                    name, position)
+end
+
+function evaluate!(b::StateSpaceBlock, _t, dt)
+    if !(b.dt_cached ≈ dt)
+        b.Φ, b.Γ = _zoh_discretize(b.A_c, b.B_c, dt)
+        b.dt_cached = dt
+    end
+    u = b.base.inputs[:in].value
+    b.base.outputs[:out].value = dot(b.C_c, b.x) + b.D_c * u
+    b.x_next = b.Φ * b.x + b.Γ * u
+end
+
+function commit_state!(b::StateSpaceBlock)
+    b.x .= b.x_next
 end
 
 end
