@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-23 — session 5)
+## Current state (as of session 2026-06-24 — session 6)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
@@ -169,10 +169,50 @@ The old multi-entry palette (18+ rows always visible) has been replaced with gro
 
 ## Remaining work
 
-### Performance (if time allows before thesis demo)
-- Profile startup time — `ControlSystems` + `GLMakie` together may push TTFP above 30 s on a cold Julia session; consider `PackageCompiler.create_sysimage` for the demo machine
-- `_zoh_discretize` allocates a new matrix every time dt changes; for diagrams with many TF/SS blocks, cache the result more aggressively (e.g. store `dt_cached` per block and skip recompute when dt is identical)
-- Large diagrams: the O(n²) connection-propagation loop in `runner.jl` may become slow; replace with a pre-built adjacency list at simulation start
+### Performance — **PRIORITY**
+
+There are two distinct categories of slowness, with different root causes and fixes.
+
+#### Category A — JIT compilation latency (first-interaction stalls)
+**Symptom:** adding the first block, drawing the first connection, and opening the first properties/scope window each take several seconds, then become instant afterward.
+**Root cause:** Julia compiles specialized native code the first time any generic function is called with a new argument-type combination. `poly!`, `lines!`, `scatter!`, `text!`, `Observable`, `@lift`, and the GLMakie event loop are all compiled on first use — thousands of methods in total.
+
+**Fixes (ordered by impact / effort):**
+
+1. ~~**`PrecompileTools.jl` workload**~~ — **DONE** (session 6)
+   - `PrecompileTools` added as a direct dependency; `@compile_workload` block added at the end of `canvas.jl`.
+   - Covers: full `simulate` run + all `poly!`/`lines!`/`scatter!`/`text!` patterns from `_setup_block!` and `_add_connection_visual!` with the exact Observable types they use.
+   - Note: alone this was insufficient — GLMakie rendering paths (OpenGL) require a real Screen, so first-interaction stalls persisted until item 2 was also done.
+
+2. ~~**`PackageCompiler` sysimage**~~ — **DONE** (session 6)
+   - `warmup.jl` exercises 16 block types + `simulate` + `draw_diagram(d)` with a real GLMakie window (visible, closed immediately with `closeall()`).
+   - `build_sysimage.jl` builds `simulite.dll` (~1.8 GB) via `PackageCompiler.create_sysimage`; took ~36 min on the dev machine.
+   - `run_simulite.bat` launches with `julia --sysimage simulite.dll --project=. -e "using SimuLite; draw_diagram()"`.
+   - `simulite.dll` and `simulite.so` added to `.gitignore`.
+   - **Result: confirmed faster** — window open, first block, first connection, first properties window all noticeably improved.
+   - Rebuild needed after: Julia version upgrade, `Pkg.update()`, or any change to SimuLite source.
+
+3. **Lazy-load `ModelingToolkit` and `DifferentialEquations`** *(medium impact, medium effort)*
+   - These packages add ~10–20 s to `using SimuLite` alone.
+   - Move `compiler.jl` (the MTK ODE path) behind a Julia 1.9+ package extension (`ext/SimuLiteCompilerExt.jl`), loaded only when the user does `using ModelingToolkit`.
+   - `simulate_ode` can remain in the public API but throw a helpful error if the extension is not loaded.
+   - Result: normal GUI startup drops by ~10–20 s; only users who call `simulate_ode` pay that cost.
+
+#### Category B — Runtime hot-path inefficiencies (affects simulation speed on larger diagrams)
+
+4. **Pre-build adjacency list in `runner.jl`** *(medium impact, low effort)*
+   - The inner loop `for c in diagram.connections` runs once per block per timestep — O(n_blocks × n_connections) per step.
+   - Fix: before the time loop, build `adj = Dict{AbstractBlock, Vector{Connection}}()` keyed by source block. Inner loop becomes `for c in get(adj, b, [])`.
+   - Makes the hot path O(n_connections) per step instead of O(n_blocks × n_connections).
+
+5. **Reduce `_bezier` allocations during drag** *(low impact, low effort)*
+   - `_bezier` allocates two `Vector{Float64}(undef, 60)` every frame for every visible connection when any block is dragged.
+   - Fix: reduce the curve resolution from `n=60` to `n=30` (visually indistinguishable at these scales), and/or pre-allocate shared buffers using a module-level `const _BEZ_XS = Vector{Float64}(undef, 30)`.
+   - Alternatively: skip redrawing connections that are off-screen.
+
+6. **`_zoh_discretize` caching** *(low impact in practice)*
+   - Already partially addressed via `dt_cached` fields on `TransferFnBlock`/`StateSpaceBlock`.
+   - Confirm the `dt_cached == dt` guard prevents re-discretization on every `evaluate!` call.
 
 ### Polish items (if time allows before thesis demo)
 - ~~Block type label displayed inside the rectangle~~ — **done** (icon zone with type symbol)

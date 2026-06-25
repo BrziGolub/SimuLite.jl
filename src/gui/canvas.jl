@@ -1,6 +1,7 @@
 module Canvas
 
 using GLMakie
+using PrecompileTools
 using ..Types
 import ..BlocksAPI: input_ports, output_ports
 import ..Diagram: connect!, add_block!, remove_block!, disconnect!
@@ -1226,6 +1227,97 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
 
     display(fig)
     return fig
+end
+
+# ── Precompilation workload ───────────────────────────────────────────────────
+# Runs once at `Pkg.precompile()` time, caching method specializations so that
+# first-use latency (first block add, first connection, first properties window)
+# is eliminated on subsequent sessions.
+@compile_workload begin
+    # Part 1: simulation engine — pure Julia, always safe
+    _d  = BlockDiagram()
+    _b1 = ConstantBlock(1.0; name="__pc_src", position=(0.0, 0.0))
+    _b2 = GainBlock(2.0;     name="__pc_gain", position=(2.0, 0.0))
+    _b3 = ScopeBlock(;        name="__pc_scope", position=(4.0, 0.0))
+    add_block!(_d, _b1); add_block!(_d, _b2); add_block!(_d, _b3)
+    connect!(_d, _b1, :out, _b2, :in)
+    connect!(_d, _b2, :out, _b3, :in1)
+    simulate(_d; tspan=(0.0, 0.05), dt=0.05)
+
+    # Part 2: Makie scene-graph method specializations — Figure/Axis/plot! calls
+    # are pure Julia (no OpenGL context needed); only display() triggers GPU work.
+    _fig = Figure()
+    _ax  = Axis(_fig[1, 1])
+
+    _c   = Observable(Point2f(0.0, 0.0))   # block center
+    _bh  = Observable(BLOCK_H)             # block height
+    _sc  = Observable{Any}(_BLUE_BORDER)   # dynamic strokecolor
+
+    # strip  — poly! with Observable{Vector{Point2f}}, color=:white
+    _strip_pts = @lift Point2f[
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] - $(_bh)/2),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] - $(_bh)/2),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+    ]
+    poly!(_ax, _strip_pts; color=:white, strokewidth=0)
+
+    # icon   — poly! with RGBf fill color
+    _icon_pts = @lift Point2f[
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] + $(_bh)/2),
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] + $(_bh)/2),
+    ]
+    poly!(_ax, _icon_pts; color=_BLUE_ICON, strokewidth=0)
+
+    # divider — lines!
+    _div_pts = @lift [
+        Point2f($(_c)[1] - BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+        Point2f($(_c)[1] + BLOCK_W/2, $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC),
+    ]
+    lines!(_ax, _div_pts; color=_BLUE_BORDER, linewidth=0.8)
+
+    # border — poly! with strokecolor=Observable{Any}
+    _border_pts = @lift Point2f[
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] - $(_bh)/2),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] - $(_bh)/2),
+        ($(_c)[1] + BLOCK_W/2, $(_c)[2] + $(_bh)/2),
+        ($(_c)[1] - BLOCK_W/2, $(_c)[2] + $(_bh)/2),
+    ]
+    poly!(_ax, _border_pts; color=(:white, 0f0), strokecolor=_sc, strokewidth=2)
+
+    # icon symbol — text! with Observable{Vector{Point2f}}
+    _icy = @lift Point2f($(_c)[1], $(_c)[2] - $(_bh)/2 + $(_bh)*(STRIP_FRAC + (1f0-STRIP_FRAC)/2f0))
+    text!(_ax, @lift([$(_icy)]); text=["Σ"], align=(:center,:center),
+          fontsize=15, color=_BLUE_BORDER)
+
+    # block name label — text! (different fontsize/color combo)
+    _lbl = @lift Point2f($(_c)[1], $(_c)[2] - $(_bh)/2 + $(_bh)*STRIP_FRAC/2f0)
+    text!(_ax, @lift([$(_lbl)]); text=["block"], align=(:center,:center),
+          fontsize=10, color=RGBf(0.20, 0.20, 0.20))
+
+    # input port — scatter! with Observable{Vector{Point2f}}
+    _ip = @lift Point2f($(_c)[1] - BLOCK_W/2, $(_c)[2])
+    scatter!(_ax, @lift([$(_ip)]); color=RGBf(0.25, 0.45, 0.75), markersize=PORT_PX)
+
+    # output port — scatter! (different color)
+    _op = @lift Point2f($(_c)[1] + BLOCK_W/2, $(_c)[2])
+    scatter!(_ax, @lift([$(_op)]); color=RGBf(0.82, 0.28, 0.22), markersize=PORT_PX)
+
+    # connection curve — lines! with bezier-computed Observable{Vector{Point2f}}
+    _psrc = Observable(Point2f(0.0, 0.0))
+    _pdst = Observable(Point2f(2.0, 0.0))
+    _curv = @lift begin
+        p0, p1 = $(_psrc), $(_pdst)
+        xs, ys = _bezier(p0[1], p0[2], p1[1], p1[2])
+        Point2f.(xs, ys)
+    end
+    lines!(_ax, _curv; color=_WIRE_COLOR, linewidth=1.8)
+
+    # arrowhead — poly! with Observable{Vector{Point2f}}
+    _arrw = @lift _arrowhead($(_psrc), $(_pdst))
+    poly!(_ax, _arrw; color=_WIRE_COLOR)
 end
 
 end

@@ -10,6 +10,7 @@ DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
 GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 ModelingToolkit = "961ee093-0014-501f-94e3-6117800e7a78"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 
 [compat]
 julia = "1"
@@ -18,3 +19,4 @@ DifferentialEquations = "8"
 GLMakie = "0.13"
 JSON3 = "1"
 ModelingToolkit = "11"
+PrecompileTools = "1"
