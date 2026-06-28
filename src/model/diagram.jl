@@ -1,6 +1,7 @@
 module Diagram
 
 using ..Types
+using ..BlocksAPI
 
 export add_block!, connect!, disconnect!, remove_block!, get_execution_order
 
@@ -37,7 +38,7 @@ function remove_block!(diagram::BlockDiagram, block::AbstractBlock)
 end
 
 # -----------------------------
-# Topological sort (Kahn)
+# Topological sort (Kahn) with feedback loop support
 # -----------------------------
 function get_execution_order(diagram::BlockDiagram)
     blocks = diagram.blocks
@@ -47,25 +48,36 @@ function get_execution_order(diagram::BlockDiagram)
         indegree[c.dst_block] += 1
     end
 
-    queue = AbstractBlock[b for b in blocks if indegree[b] == 0]
-    order = AbstractBlock[]
+    queue    = AbstractBlock[b for b in blocks if indegree[b] == 0]
+    order    = AbstractBlock[]
+    in_order = Set{AbstractBlock}()
 
-    while !isempty(queue)
+    while length(order) < length(blocks)
+        if isempty(queue)
+            # Kahn's stalled — a cycle exists.
+            # Find a memory block (no direct feedthrough) to act as cycle-breaker.
+            remaining = [b for b in blocks if b ∉ in_order]
+            idx = findfirst(b -> !has_direct_feedthrough(b), remaining)
+            if idx === nothing
+                throw(AlgebraicLoopError(
+                    "cycle contains only direct-feedthrough blocks — cannot resolve automatically"))
+            end
+            push!(queue, remaining[idx])
+        end
+
         b = popfirst!(queue)
+        b ∈ in_order && continue
         push!(order, b)
+        push!(in_order, b)
 
         for c in diagram.connections
             if c.src_block === b
                 indegree[c.dst_block] -= 1
-                if indegree[c.dst_block] == 0
+                if indegree[c.dst_block] == 0 && c.dst_block ∉ in_order
                     push!(queue, c.dst_block)
                 end
             end
         end
-    end
-
-    if length(order) != length(blocks)
-        error("Cycle detected in diagram (feedback not supported yet)")
     end
 
     return order

@@ -5,9 +5,10 @@ Built as a university thesis project.
 
 ## Features
 
-- **Interactive GUI** — drag-and-drop canvas, tabbed block palette, bezier wires, zoom/pan
+- **Interactive GUI** — drag-and-drop canvas, block palette, bezier wires, zoom/pan
 - **Double-click to edit** — every block opens a floating properties window on double-click
 - **20 built-in blocks** across sources, math, and sinks categories
+- **Feedback loops** — closed-loop diagrams work when the cycle contains a memory block (Integrator, UnitDelay, TransferFn, StateSpace); feedback wires arc below the diagram automatically
 - **Two simulation backends** — fixed-step discrete runner and symbolic ODE compiler via ModelingToolkit
 - **Save / load** — diagrams serialized to JSON
 - **Scope windows** — dedicated plot window per Scope block, opened after simulation
@@ -94,6 +95,30 @@ result = simulate(d)
 # result.t        — time vector
 # result.data     — Dict of signal vectors, keyed by "blockname.portname"
 ```
+
+### Feedback / closed-loop example
+
+```julia
+using SimuLite
+
+d = BlockDiagram()
+ref   = add_block!(d, ConstantBlock(1.0;  name="ref"))
+err   = add_block!(d, SumBlock("+-";      name="err"))
+ctrl  = add_block!(d, PIDBlock(Kp=2.0, Ki=1.0, Kd=0.0; name="ctrl"))
+plant = add_block!(d, IntegratorBlock(0.0; name="plant"))
+scope = add_block!(d, ScopeBlock(;        name="scope"))
+
+connect!(d, ref,   :out, err,   :in1)   # reference
+connect!(d, plant, :out, err,   :in2)   # feedback
+connect!(d, err,   :out, ctrl,  :in)
+connect!(d, ctrl,  :out, plant, :in)
+connect!(d, plant, :out, scope, :in1)
+
+result = simulate(d; tspan=(0.0, 5.0), dt=0.01)
+draw_diagram(d)   # open in GUI to see the feedback wire arc below
+```
+
+The loop must contain at least one memory block (Integrator, UnitDelay, TransferFn, or StateSpace with D=0). A cycle of only direct-feedthrough blocks throws `AlgebraicLoopError`.
 
 ## Block Catalog
 

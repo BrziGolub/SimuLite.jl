@@ -1,6 +1,7 @@
 module BlocksAPI
 
-export evaluate!, commit_state!, initialize!, input_ports, output_ports
+export evaluate!, commit_state!, initialize!, input_ports, output_ports,
+       has_direct_feedthrough
 
 function evaluate!(block, t, dt)
     error("evaluate! not implemented for $(typeof(block))")
@@ -11,6 +12,8 @@ end
 
 function initialize!(_)
 end
+
+has_direct_feedthrough(block) = true
 
 """
     input_ports(block) -> Vector{Symbol}

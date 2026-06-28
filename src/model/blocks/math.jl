@@ -5,7 +5,7 @@ using ..BlocksCommon
 import ControlSystems
 using LinearAlgebra
 
-import ..BlocksAPI: evaluate!, commit_state!, initialize!
+import ..BlocksAPI: evaluate!, commit_state!, initialize!, has_direct_feedthrough
 
 export GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
        ProductBlock, SaturationBlock, AbsBlock,
@@ -90,6 +90,8 @@ function commit_state!(b::IntegratorBlock)
     b.state = b.next_state
 end
 
+has_direct_feedthrough(::IntegratorBlock) = false
+
 function initialize!(b::IntegratorBlock)
     b.state = b.x0
     b.next_state = b.x0
@@ -119,6 +121,8 @@ end
 function commit_state!(b::UnitDelayBlock)
     b.state = b.next_state
 end
+
+has_direct_feedthrough(::UnitDelayBlock) = false
 
 function initialize!(b::UnitDelayBlock)
     b.state = b.x0
@@ -380,6 +384,8 @@ function initialize!(b::TransferFnBlock)
     b.dt_cached = -1.0
 end
 
+has_direct_feedthrough(b::TransferFnBlock) = !iszero(b.D_c)
+
 # ------------------------------------------
 # StateSpaceBlock
 # Continuous-time SISO state-space: ẋ = A·x + B·u, y = C·x + D·u.
@@ -434,5 +440,7 @@ function initialize!(b::StateSpaceBlock)
     fill!(b.x_next, 0.0)
     b.dt_cached = -1.0
 end
+
+has_direct_feedthrough(b::StateSpaceBlock) = !iszero(b.D_c)
 
 end

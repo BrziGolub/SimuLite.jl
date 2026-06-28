@@ -1,7 +1,8 @@
 module Types
 
 export Port, AbstractBlock, Connection, SimConfig, BlockDiagram, SimResult,
-       DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError
+       DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError,
+       AlgebraicLoopError
 
 abstract type DiagramError <: Exception end
 
@@ -25,6 +26,12 @@ struct PortAlreadyConnectedError <: DiagramError
 end
 Base.showerror(io::IO, e::PortAlreadyConnectedError) =
     print(io, "PortAlreadyConnectedError: input port :$(e.port) of \"$(e.block_name)\" is already driven by a connection")
+
+struct AlgebraicLoopError <: DiagramError
+    msg :: String
+end
+Base.showerror(io::IO, e::AlgebraicLoopError) =
+    print(io, "AlgebraicLoopError: $(e.msg)")
 
 mutable struct Port
     name::Symbol

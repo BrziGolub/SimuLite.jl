@@ -6,14 +6,14 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-24 — session 6)
+## Current state (as of session 2026-06-26 — session 7)
 
 ### Simulation engine — COMPLETE
-- Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays
+- Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays, feedback loops
 - ODE compiler path via ModelingToolkit (`simulate_ode`) — symbolic ODE system, adaptive solver
 - Three-phase block lifecycle: `initialize!` (reset state) → `evaluate!` (output current state) → `commit_state!` (advance state)
 - `simulate` calls `initialize!` on every block before the loop; pass `continue_sim=true` to skip and carry over final states from the previous run
-- Topological sort (Kahn's algorithm) — blocks always evaluated in dependency order
+- Topological sort (Kahn's algorithm) with feedback loop support — memory blocks (Integrator, UnitDelay, TF/SS with D=0) act as cycle-breakers; pure algebraic loops throw `AlgebraicLoopError`
 - `simulate` returns `SimResult(t, data)` — time vector + named signal vectors
 
 ### Model layer — COMPLETE
@@ -49,7 +49,7 @@ Target: working GUI on top of a solid simulation engine.
 | `TerminatorBlock` | sinks | `TerminatorBlock()` | No-op sink — caps unused output ports |
 
 ### Known limitations (deferred)
-- No algebraic loop solving — cycles in the diagram error out
+- No algebraic loop solving — pure direct-feedthrough cycles (e.g. Gain→Sum→Gain) throw `AlgebraicLoopError`; feedback loops containing a memory block work correctly
 - All signals are scalar `Float64` only
 - No subsystems / hierarchical diagrams
 
@@ -62,12 +62,14 @@ src/
   model/
     types.jl                — Port, AbstractBlock, Connection,
                               SimConfig, BlockDiagram, SimResult,
-                              DiagramError subtypes
+                              DiagramError subtypes (incl. AlgebraicLoopError)
     diagram.jl              — add_block!, connect!, disconnect!,
                               remove_block!, get_execution_order
+                              (cycle-aware Kahn's with memory-block breaking)
     blocks/
       api.jl                — evaluate!, commit_state!, initialize!,
-                              input_ports, output_ports
+                              input_ports, output_ports,
+                              has_direct_feedthrough
       common.jl             — BlockBase, _next_id() counter
       sources.jl            — ConstantBlock, StepBlock, SineBlock,
                               RampBlock, ClockBlock
@@ -106,6 +108,7 @@ test/
 - **Single palette entry + reconfigurable ports** — `SumBlock` and `ScopeBlock` have one palette button each (default `"++"` / 1 port). Double-clicking their Properties window reconfigures port count on the fly: `_reconfigure_inputs!` tears down old port Observables/scatter plots and connection visuals for removed ports, rebuilds `block.base.inputs`, updates `bh_obs`, and recreates surviving connection visuals against the new port Observables. `ScopeBlock` properties are accessed via **Ctrl+double-click** (plain double-click opens the scope result window).
 - **Block Library group-first navigation** — default ("All") view shows three category buttons (Sources / Math / Sinks); clicking one drills into that category. Category dropdown and search still work normally for direct access.
 - **Blue wires** — connections drawn in `_WIRE_COLOR = RGBf(0.19, 0.43, 0.69)` (linewidth 1.8); turn orange `_ORA_COLOR` on selection, restored on deselect.
+- **Backward bezier routing** — `_bezier` detects feedback wires (`x1 < x0 - 0.1`) and routes them as a downward arc (`drop = max(spread × 0.4, 1.2)`) that clears the block layout, instead of cutting through blocks. Forward wires use the original S-curve.
 - **Dot grid canvas** — 825 scatter dots at 0.5-unit spacing on warm-white background `RGBf(0.98, 0.98, 0.97)`; dots zoom with the canvas naturally.
 - **Single-row toolbar** (Section 5 wireframe style) — `New | Save | Load [filename]` for file ops, `▶ Run | ■ Stop | ✕ Clear` for simulation, `t₀ [txt] tstop [txt] Δt [txt]` for timing. No separate menubar strip. File tab removed from palette.
 - **Block Library panel** (2-column layout, 236px total — Section 5 wireframe):
@@ -267,7 +270,7 @@ test/
 ---
 
 ## Post-thesis backlog
-- Algebraic loop resolution (iterative solver for direct-feedthrough cycles)
+- Algebraic loop resolution (iterative solver for pure direct-feedthrough cycles — feedback loops with memory blocks already work)
 - Signal vectors / matrices (non-scalar ports)
 - Subsystems (hierarchical diagrams with In/Out port blocks)
 - Expose `simulate_ode` in GUI as "continuous solver" toggle

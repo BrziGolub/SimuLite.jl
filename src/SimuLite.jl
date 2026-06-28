@@ -23,7 +23,8 @@ using .Runner
 using .Canvas
 
 export BlockDiagram, SimConfig, SimResult, add_block!, connect!, disconnect!, remove_block!
-export DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError
+export DiagramError, DuplicateNameError, PortNotFoundError, PortAlreadyConnectedError,
+       AlgebraicLoopError
 export input_ports, output_ports, initialize!
 export ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
 export GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,

@@ -85,9 +85,17 @@ end
 # ── Geometry helpers ──────────────────────────────────────────────────────────
 
 function _bezier(x0, y0, x1, y1; n=60)
-    dx = max(abs(x1 - x0) * 0.45, 0.35)
-    cx0, cy0 = x0 + dx, y0
-    cx1, cy1 = x1 - dx, y1
+    if x1 >= x0 - 0.1
+        dx = max((x1 - x0) * 0.45, 0.35)
+        cx0, cy0 = x0 + dx, y0
+        cx1, cy1 = x1 - dx, y1
+    else
+        # Backward connection — arc below the block layout
+        spread = x0 - x1
+        drop   = max(spread * 0.4, 1.2)
+        cx0, cy0 = x0 + spread * 0.2, y0 - drop
+        cx1, cy1 = x1 - spread * 0.2, y1 - drop
+    end
     xs = Vector{Float64}(undef, n)
     ys = Vector{Float64}(undef, n)
     for i in 1:n
