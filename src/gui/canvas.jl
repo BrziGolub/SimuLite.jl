@@ -55,6 +55,39 @@ mutable struct ConnVisual
     arrow :: Any
 end
 
+# ── Undo / Redo action types ──────────────────────────────────────────────────
+
+abstract type UndoAction end
+
+struct AddBlockAction <: UndoAction
+    block :: AbstractBlock
+end
+
+struct DeleteBlockAction <: UndoAction
+    block         :: AbstractBlock
+    removed_conns :: Vector{Tuple{AbstractBlock, Symbol, AbstractBlock, Symbol}}
+end
+
+struct MoveBlockAction <: UndoAction
+    block   :: AbstractBlock
+    old_pos :: Tuple{Float64, Float64}
+    new_pos :: Tuple{Float64, Float64}
+end
+
+struct AddConnectionAction <: UndoAction
+    src_block :: AbstractBlock
+    src_port  :: Symbol
+    dst_block :: AbstractBlock
+    dst_port  :: Symbol
+end
+
+struct DeleteConnectionAction <: UndoAction
+    src_block :: AbstractBlock
+    src_port  :: Symbol
+    dst_block :: AbstractBlock
+    dst_port  :: Symbol
+end
+
 # ── Block type icons and colors ───────────────────────────────────────────────
 
 function _block_icon(block)
@@ -830,6 +863,9 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     scope_screens  = Dict{AbstractBlock, Any}()
     prop_screens   = Dict{AbstractBlock, Any}()
     last_result    = Ref{Union{Nothing, SimResult}}(nothing)
+    undo_stack     = UndoAction[]
+    redo_stack     = UndoAction[]
+    drag_start_pos = Ref{Tuple{Float64, Float64}}((0.0, 0.0))
 
     # ── Draw existing diagram ─────────────────────────────────────────────────
     for block in diagram.blocks
@@ -872,6 +908,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             try; screen.window_open[] && close(screen); catch _; end
         end
         empty!(prop_screens)
+        empty!(undo_stack)
+        empty!(redo_stack)
     end
 
     function _cancel_wire!()
@@ -899,6 +937,121 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         end
     end
 
+    # ── Undo / Redo ───────────────────────────────────────────────────────────
+
+    function _push_undo!(action::UndoAction)
+        push!(undo_stack, action)
+        empty!(redo_stack)
+    end
+
+    function _find_conn(sb, sp, db, dp)
+        for c in diagram.connections
+            c.src_block === sb && c.src_port === sp &&
+            c.dst_block === db && c.dst_port === dp && return c
+        end
+        nothing
+    end
+
+    function _remove_conn_visual!(sb, sp, db, dp)
+        conn = _find_conn(sb, sp, db, dp)
+        conn === nothing && return
+        cv = get(conn_visuals, conn, nothing)
+        if cv !== nothing
+            delete!(ax, cv.curve); delete!(ax, cv.arrow)
+            delete!(conn_visuals, conn)
+        end
+        disconnect!(diagram, sb, sp, db, dp)
+    end
+
+    function _add_conn_visual!(sb, sp, db, dp)
+        connect!(diagram, sb, sp, db, dp)
+        conn = diagram.connections[end]
+        conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+    end
+
+    function _apply_action!(action::AddBlockAction, forward::Bool)
+        if forward
+            add_block!(diagram, action.block)
+            block_visuals[action.block] = _setup_block!(ax, action.block,
+                block_centers, block_strokes, block_heights, port_pos, port_type)
+        else
+            _delete_block!(ax, diagram, action.block,
+                block_centers, block_strokes, block_heights,
+                port_pos, port_type, block_visuals, conn_visuals)
+        end
+    end
+
+    function _apply_action!(action::DeleteBlockAction, forward::Bool)
+        if forward
+            _delete_block!(ax, diagram, action.block,
+                block_centers, block_strokes, block_heights,
+                port_pos, port_type, block_visuals, conn_visuals)
+        else
+            add_block!(diagram, action.block)
+            block_visuals[action.block] = _setup_block!(ax, action.block,
+                block_centers, block_strokes, block_heights, port_pos, port_type)
+            for (sb, sp, db, dp) in action.removed_conns
+                try; _add_conn_visual!(sb, sp, db, dp); catch _; end
+            end
+        end
+    end
+
+    function _apply_action!(action::MoveBlockAction, forward::Bool)
+        pos = forward ? action.new_pos : action.old_pos
+        action.block.position = pos
+        block_centers[action.block][] = Point2f(pos...)
+    end
+
+    function _apply_action!(action::AddConnectionAction, forward::Bool)
+        if forward
+            _add_conn_visual!(action.src_block, action.src_port,
+                              action.dst_block, action.dst_port)
+        else
+            _remove_conn_visual!(action.src_block, action.src_port,
+                                 action.dst_block, action.dst_port)
+        end
+    end
+
+    function _apply_action!(action::DeleteConnectionAction, forward::Bool)
+        if forward
+            _remove_conn_visual!(action.src_block, action.src_port,
+                                 action.dst_block, action.dst_port)
+        else
+            _add_conn_visual!(action.src_block, action.src_port,
+                              action.dst_block, action.dst_port)
+        end
+    end
+
+    function do_undo!()
+        if isempty(undo_stack)
+            status[] = "Nothing to undo"
+            return
+        end
+        action = pop!(undo_stack)
+        try
+            _apply_action!(action, false)
+            push!(redo_stack, action)
+            status[] = "Undo"
+        catch e
+            status[] = "Undo failed: $(sprint(showerror, e))"
+        end
+    end
+
+    function do_redo!()
+        if isempty(redo_stack)
+            status[] = "Nothing to redo"
+            return
+        end
+        action = pop!(redo_stack)
+        try
+            _apply_action!(action, true)
+            push!(undo_stack, action)
+            status[] = "Redo"
+        catch e
+            status[] = "Redo failed: $(sprint(showerror, e))"
+        end
+    end
+
     register_interaction!(ax, :diagram_interaction) do event::MouseEvent, _
         pos = event.data
 
@@ -918,6 +1071,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                         connect!(diagram, src_block, src_port, dst_block, dst_port)
                         conn = diagram.connections[end]
                         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+                        _push_undo!(AddConnectionAction(src_block, src_port, dst_block, dst_port))
                         status[] = "Connected $(src_block.name):$(src_port) → $(dst_block.name):$(dst_port)"
                     catch e
                         status[] = e isa DiagramError ?
@@ -945,6 +1099,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                             selected[]             = block
                             c                      = block_centers[block][]
                             drag_offset[]          = (c[1] - pos[1], c[2] - pos[2])
+                            drag_start_pos[]       = block.position
                             block_strokes[block][] = _SEL_COLOR
                             status[] = "$(block.name) selected — double-click to edit, Delete to remove"
                             break
@@ -994,19 +1149,34 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
 
         elseif event.type == MouseEventTypes.leftup
             if selected[] !== nothing
-                c = block_centers[selected[]][]
-                selected[].position = (Float64(c[1]), Float64(c[2]))
+                c       = block_centers[selected[]][]
+                new_pos = (Float64(c[1]), Float64(c[2]))
+                old_pos = drag_start_pos[]
+                selected[].position = new_pos
+                if new_pos != old_pos
+                    _push_undo!(MoveBlockAction(selected[], old_pos, new_pos))
+                end
             end
         end
     end
 
     on(events(ax.scene).keyboardbutton) do ev
         ev.action == Keyboard.press || return
+        ctrl  = Keyboard.left_control in events(ax.scene).keyboardstate ||
+                Keyboard.right_control in events(ax.scene).keyboardstate
+        shift = Keyboard.left_shift in events(ax.scene).keyboardstate ||
+                Keyboard.right_shift in events(ax.scene).keyboardstate
         if ev.key == Keyboard.escape
             wire_active[] ? _cancel_wire!() : _deselect!()
+        elseif ev.key == Keyboard.z && ctrl
+            shift ? do_redo!() : do_undo!()
+        elseif ev.key == Keyboard.y && ctrl
+            do_redo!()
         elseif ev.key == Keyboard.delete && !wire_active[]
             if selected_conn[] !== nothing
                 conn = selected_conn[]
+                _push_undo!(DeleteConnectionAction(conn.src_block, conn.src_port,
+                                                   conn.dst_block, conn.dst_port))
                 _deselect_conn!()
                 cv = conn_visuals[conn]
                 delete!(ax, cv.curve)
@@ -1017,10 +1187,15 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 status[] = "Connection deleted"
             elseif selected[] !== nothing
                 block = selected[]
+                removed = Tuple{AbstractBlock, Symbol, AbstractBlock, Symbol}[
+                    (c.src_block, c.src_port, c.dst_block, c.dst_port)
+                    for c in filter(c -> c.src_block === block || c.dst_block === block,
+                                    diagram.connections)]
                 selected[] = nothing
                 _delete_block!(ax, diagram, block,
                     block_centers, block_strokes, block_heights,
                     port_pos, port_type, block_visuals, conn_visuals)
+                _push_undo!(DeleteBlockAction(block, removed))
                 status[] = "Block deleted"
             end
         end
@@ -1088,6 +1263,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             end
             block_visuals[block] = _setup_block!(ax, block,
                 block_centers, block_strokes, block_heights, port_pos, port_type)
+            _push_undo!(AddBlockAction(block))
             status[] = "Added $(block.name) — drag to position"
         end
         push!(pal_items[], chip)

@@ -224,7 +224,7 @@ There are two distinct categories of slowness, with different root causes and fi
 - Right-click context menu to delete block or wire
 - Port name labels on hover
 - Snap-to-grid for block positioning
-- Undo/redo stack
+- ~~Undo/redo stack~~ — **done** (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y; covers add/delete/move block, add/delete connection)
 - Rename validation (reject empty names, reject duplicate names before committing)
 
 ### GUI dependency decision (permanent)
