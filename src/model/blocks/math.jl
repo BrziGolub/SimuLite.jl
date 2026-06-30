@@ -95,6 +95,7 @@ has_direct_feedthrough(::IntegratorBlock) = false
 function initialize!(b::IntegratorBlock)
     b.state = b.x0
     b.next_state = b.x0
+    b.base.outputs[:out].value = b.x0
 end
 
 # ------------------------------------------
@@ -127,6 +128,7 @@ has_direct_feedthrough(::UnitDelayBlock) = false
 function initialize!(b::UnitDelayBlock)
     b.state = b.x0
     b.next_state = b.x0
+    b.base.outputs[:out].value = b.x0
 end
 
 # ------------------------------------------
@@ -226,6 +228,7 @@ end
 function initialize!(b::DerivativeBlock)
     b.state = 0.0
     b.next_state = 0.0
+    b.base.outputs[:out].value = 0.0
 end
 
 # ------------------------------------------
@@ -274,6 +277,7 @@ function initialize!(b::PIDBlock)
     b.fd = 0.0
     b.xi_next = 0.0
     b.fd_next = 0.0
+    b.base.outputs[:out].value = 0.0
 end
 
 # ------------------------------------------
@@ -382,6 +386,7 @@ function initialize!(b::TransferFnBlock)
     fill!(b.x, 0.0)
     fill!(b.x_next, 0.0)
     b.dt_cached = -1.0
+    b.base.outputs[:out].value = 0.0
 end
 
 has_direct_feedthrough(b::TransferFnBlock) = !iszero(b.D_c)
@@ -439,6 +444,7 @@ function initialize!(b::StateSpaceBlock)
     fill!(b.x, 0.0)
     fill!(b.x_next, 0.0)
     b.dt_cached = -1.0
+    b.base.outputs[:out].value = 0.0
 end
 
 has_direct_feedthrough(b::StateSpaceBlock) = !iszero(b.D_c)

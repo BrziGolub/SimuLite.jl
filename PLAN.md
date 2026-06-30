@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-06-26 — session 7)
+## Current state (as of session 2026-07-01 — session 8)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays, feedback loops
@@ -164,6 +164,20 @@ Opening the GUI shows a 3-row window sized to 92 × 88% of the primary monitor:
 ---
 
 ## Known bugs / open issues
+
+### Save/load restores blocks with wrong parameters — **OPEN**
+`save_diagram` serializes block constructor params and `_reconstruct_block` rebuilds blocks from JSON. However, certain blocks (confirmed: `IntegratorBlock`) are reconstructed with wrong parameter values — e.g. `x0` is not preserved correctly. This means loading a saved diagram and running it may produce different results than before saving.
+- Root cause: likely `_reconstruct_block` in `canvas.jl` either reads the wrong JSON field name or maps params to the constructor in the wrong order for some block types.
+- Fix needed: audit every block's `params` dict in `save_diagram` and the corresponding `_reconstruct_block` branch; add a round-trip test (`test_io.jl`) that verifies each block type restores with identical field values.
+- Affects: thesis demo if the user saves and reloads a diagram with non-default ICs.
+
+### Stale port values between simulation runs — **FIXED (session 8)**
+- Symptom: setting t₀ = 0.0 caused growing oscillations ("sky rocket numbers") on repeated runs; t₀ = 0.1 worked correctly.
+- Root cause: non-stateful blocks (`SumBlock`, `GainBlock`, …) never had their output ports reset between runs. On re-run the propagation pass distributed stale end-of-previous-run values into cycle-breaker block inputs (e.g. `Int1` reads `Sum2.out` before `Sum2` evaluates). Stateful block `initialize!` methods also did not reset `b.base.outputs[:out].value`.
+- Fix applied (`runner.jl`, `math.jl`):
+  1. `runner.jl`: zero ALL output ports before `initialize!` so non-stateful blocks start clean.
+  2. `runner.jl`: propagation pass after `initialize!` distributes initial values to downstream inputs.
+  3. `math.jl`: `initialize!` for all 6 stateful blocks now explicitly sets `b.base.outputs[:out].value` (= `x0` for Integrator/UnitDelay, 0.0 for others).
 
 ### Palette widget squashing *(superseded)*
 The old multi-entry palette (18+ rows always visible) has been replaced with group-first navigation — the default view shows only 3 category buttons, so squashing of a long list is no longer a concern.

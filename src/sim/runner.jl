@@ -18,8 +18,23 @@ function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing, continue_sim
     order = get_execution_order(diagram)
 
     if !continue_sim
+        # Clear every output port first so non-stateful blocks (Sum, Gain, …)
+        # don't carry stale values from the previous run into the propagation pass.
+        for b in diagram.blocks
+            for (_, port) in b.base.outputs
+                port.value = 0.0
+            end
+        end
+        # initialize! for stateful blocks (Integrator, UnitDelay, …) will
+        # overwrite the zeros above with the correct initial condition (x0).
         for b in order
             initialize!(b)
+        end
+        # Propagate initial output values to downstream input ports so the first
+        # evaluate! step sees correct values (x0 for stateful blocks, 0 otherwise).
+        for c in diagram.connections
+            c.dst_block.base.inputs[c.dst_port].value =
+                c.src_block.base.outputs[c.src_port].value
         end
     end
 
