@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-07-01 — session 8)
+## Current state (as of session 2026-07-07 — session 9)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays, feedback loops
@@ -33,7 +33,7 @@ Target: working GUI on top of a solid simulation engine.
 | `RampBlock` | sources | `RampBlock(; slope, start_time, bias)` | Linear ramp starting at `start_time` |
 | `ClockBlock` | sources | `ClockBlock()` | Outputs simulation time `t` |
 | `GainBlock` | math | `GainBlock(k)` | Scalar multiply |
-| `SumBlock` | math | `SumBlock("+-")` | Configurable signs per input port |
+| `SumBlock` | math | `SumBlock("+-")` | Configurable signs per input; rendered as a circle with per-port `+`/`−` glyphs (GUI) |
 | `IntegratorBlock` | math | `IntegratorBlock(x0)` | Forward Euler, feeds MTK ODE compiler |
 | `UnitDelayBlock` | math | `UnitDelayBlock(x0)` | Discrete z⁻¹ |
 | `ProductBlock` | math | `ProductBlock(ops)` | `ops` is `Vector{Symbol}` of `:mul`/`:div` per port |
@@ -104,13 +104,14 @@ test/
 - **Custom exception hierarchy** — `DiagramError` subtypes so the GUI can catch specific errors and show user-friendly messages.
 - **Observable-based GUI** — block centers, port positions, and connection curves are all `@lift`-derived Observables; dragging a block updates everything reactively without explicit redraws.
 - **Icon-card block visual style** (wireframe Style C) — each block is split into two zones: top ~70% is a tinted icon zone with the type symbol (`⎍`, `Σ`, `PID`, `∿`, …), bottom 30% is a white name strip. Three category border colors: blue (`_BLUE_BORDER`) for Sources + most Math, amber (`_AMGR_BORDER`) for PID, green (`_GRNN_BORDER`) for Sinks. Selection uses bright dodgerblue `_SEL_COLOR`; deselect restores the block's natural `border_color` stored in `BlockVisual`.
+- **Circular Sum block** (Simulink-style, exception to the icon-card style) — `SumBlock` renders as a filled circle (radius follows the reactive block height) instead of the two-zone card. Input ports are indexed explicitly `in1…inN` **top-to-bottom** (not via `Dict`-key order, which is unspecified), each with its `+`/`−` sign glyph painted just inside the circle next to the port, so the sign-to-port mapping is unambiguous. The output port is on the right edge, the name label sits below the circle. `_setup_sum_visual!` builds it; `_reconfigure_sum_inputs!` rebuilds arc ports + glyphs when the signs string changes (circle auto-resizes via `bh_obs`). `BlockVisual` gained `extras` (sign glyph plots) and `input_sides` (per-input side Observables); `_delete_block!` tolerates `nothing` visual slots.
 - **Reactive block height** — `_block_height(block)` is wrapped in `Observable{Float64}` per block (`block_heights` dict); all geometry and port-position `@lift`s reference `$bh_obs` so the block resizes live when port count changes.
 - **Single palette entry + reconfigurable ports** — `SumBlock` and `ScopeBlock` have one palette button each (default `"++"` / 1 port). Double-clicking their Properties window reconfigures port count on the fly: `_reconfigure_inputs!` tears down old port Observables/scatter plots and connection visuals for removed ports, rebuilds `block.base.inputs`, updates `bh_obs`, and recreates surviving connection visuals against the new port Observables. `ScopeBlock` properties are accessed via **Ctrl+double-click** (plain double-click opens the scope result window).
 - **Block Library group-first navigation** — default ("All") view shows three category buttons (Sources / Math / Sinks); clicking one drills into that category. Category dropdown and search still work normally for direct access.
 - **Blue wires** — connections drawn in `_WIRE_COLOR = RGBf(0.19, 0.43, 0.69)` (linewidth 1.8); turn orange `_ORA_COLOR` on selection, restored on deselect.
-- **Backward bezier routing** — `_bezier` detects feedback wires (`x1 < x0 - 0.1`) and routes them as a downward arc (`drop = max(spread × 0.4, 1.2)`) that clears the block layout, instead of cutting through blocks. Forward wires use the original S-curve.
+- **Orthogonal feedback routing + bottom-entry Sum ports** — `_bezier` detects feedback wires (`x1 < x0 - 0.1`) and routes them as a **right-angle (Manhattan) path** through a channel below the blocks that rises vertically into the destination port (`_ortho_pts` densely samples the polyline so `_arrowhead`/`_hit_connection` keep working). Forward wires keep the S-curve. For **Sum blocks**, each input port carries a reactive `:left`/`:bottom` side (`BlockVisual.input_sides`); `_refresh_feedback_sides!` re-evaluates all Sum inputs after any topology/position change and moves feedback-fed ports (dot + sign glyph) to the bottom of the circle so the wire enters from below. Feedback is detected geometrically (source block centre right of destination centre); ports relocate on connect / disconnect / drag-release / load / signs-reconfigure / undo-redo / initial draw. Single-driven inputs make the "which port is feedback" mapping unambiguous.
 - **Dot grid canvas** — 825 scatter dots at 0.5-unit spacing on warm-white background `RGBf(0.98, 0.98, 0.97)`; dots zoom with the canvas naturally.
-- **Single-row toolbar** (Section 5 wireframe style) — `New | Save | Load [filename]` for file ops, `▶ Run | ■ Stop | ✕ Clear` for simulation, `t₀ [txt] tstop [txt] Δt [txt]` for timing. No separate menubar strip. File tab removed from palette.
+- **Single-row toolbar** (Section 5 wireframe style) — `New | Save | Load [filename]` for file ops, `↶ Undo | ↷ Redo` for edit history, `▶ Run | ■ Stop | ✕ Clear` for simulation, `t₀ [txt] tstop [txt] Δt [txt]` for timing, groups split by thin `│` separators. Undo/Redo sit **before** Run (Simulink order) and mirror the Ctrl+Z / Ctrl+Y shortcuts. All items are **left-aligned** via a flexible trailing spacer column (`colsize!(toolbar, N, Auto(false))`) that absorbs slack, with `colgap!(toolbar, 6)` tightening inter-item spacing. No separate menubar strip. File tab removed from palette.
 - **Block Library panel** (2-column layout, 236px total — Section 5 wireframe):
   - Row 1: "Block Library" bold header (span 1:2)
   - Row 2: `Menu` dropdown (All / Sources / Math / Sinks, span 1:2)

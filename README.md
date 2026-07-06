@@ -5,10 +5,11 @@ Built as a university thesis project.
 
 ## Features
 
-- **Interactive GUI** — drag-and-drop canvas, block palette, bezier wires, zoom/pan
+- **Interactive GUI** — drag-and-drop canvas, block palette, zoom/pan, undo/redo (buttons + Ctrl+Z / Ctrl+Y)
 - **Double-click to edit** — every block opens a floating properties window on double-click
 - **20 built-in blocks** across sources, math, and sinks categories
-- **Feedback loops** — closed-loop diagrams work when the cycle contains a memory block (Integrator, UnitDelay, TransferFn, StateSpace); feedback wires arc below the diagram automatically
+- **Simulink-style Sum block** — circular block with per-port `+`/`−` sign glyphs; feedback-fed ports drop to the bottom of the circle
+- **Feedback loops** — closed-loop diagrams work when the cycle contains a memory block (Integrator, UnitDelay, TransferFn, StateSpace); feedback wires route at right angles through a channel below the diagram and enter the bottom of the Sum block. Forward wires stay smooth curves.
 - **Two simulation backends** — fixed-step discrete runner and symbolic ODE compiler via ModelingToolkit
 - **Save / load** — diagrams serialized to JSON
 - **Scope windows** — dedicated plot window per Scope block, opened after simulation
@@ -59,6 +60,7 @@ That's it. A full-screen window opens with the block palette on the left and the
 | Draw wire | Click an output port (red circle) → click an input port (blue circle) |
 | Cancel wire | **Escape** |
 | Delete wire | Click the wire to select it (turns orange) → **Delete** |
+| Undo / Redo | Toolbar **↶ Undo** / **↷ Redo** buttons, or **Ctrl+Z** / **Ctrl+Y** (Ctrl+Shift+Z also redoes) |
 | Run simulation | Click **▶ Run** in the toolbar |
 | View scope | Double-click a Scope block after running |
 | Save diagram | Enter filename in toolbar textbox → click **Save** |
@@ -115,7 +117,7 @@ connect!(d, ctrl,  :out, plant, :in)
 connect!(d, plant, :out, scope, :in1)
 
 result = simulate(d; tspan=(0.0, 5.0), dt=0.01)
-draw_diagram(d)   # open in GUI to see the feedback wire arc below
+draw_diagram(d)   # open in GUI: feedback wire routes at a right angle into the bottom of `err`
 ```
 
 The loop must contain at least one memory block (Integrator, UnitDelay, TransferFn, or StateSpace with D=0). A cycle of only direct-feedthrough blocks throws `AlgebraicLoopError`.
@@ -137,7 +139,7 @@ The loop must contain at least one memory block (Integrator, UnitDelay, Transfer
 | Block | Constructor | Notes |
 |---|---|---|
 | `GainBlock` | `GainBlock(k)` | `y = k·u` |
-| `SumBlock` | `SumBlock("+-")` | Signs string, one `+`/`-` per input |
+| `SumBlock` | `SumBlock("+-")` | Signs string, one `+`/`-` per input; circular block, `in1…inN` top-to-bottom |
 | `IntegratorBlock` | `IntegratorBlock(x0)` | Forward Euler, initial state `x0` |
 | `UnitDelayBlock` | `UnitDelayBlock(x0)` | Discrete z⁻¹ |
 | `ProductBlock` | `ProductBlock([:mul, :div])` | Per-port multiply or divide |

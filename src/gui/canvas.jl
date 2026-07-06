@@ -48,6 +48,8 @@ mutable struct BlockVisual
     label        :: Any
     ports        :: Vector{Any}
     border_color :: RGBf
+    extras       :: Vector{Any}   # block-specific decorations (e.g. Sum sign glyphs)
+    input_sides  :: Dict{Symbol, Observable{Symbol}}   # Sum: per-input :left/:bottom
 end
 
 mutable struct ConnVisual
@@ -117,27 +119,48 @@ end
 
 # ── Geometry helpers ──────────────────────────────────────────────────────────
 
+# Densely sample a right-angle polyline through `corners`, so the arrowhead and
+# hit-testing (which read the returned point list) keep working unchanged.
+function _ortho_pts(corners; step = 0.06)
+    xs = Float64[]; ys = Float64[]
+    for k in 1:length(corners) - 1
+        ax0, ay0 = corners[k]
+        bx0, by0 = corners[k + 1]
+        m = max(2, ceil(Int, hypot(bx0 - ax0, by0 - ay0) / step))
+        for j in 0:m - 1
+            t = j / m
+            push!(xs, ax0 + t * (bx0 - ax0))
+            push!(ys, ay0 + t * (by0 - ay0))
+        end
+    end
+    push!(xs, corners[end][1]); push!(ys, corners[end][2])
+    xs, ys
+end
+
+# Route a connection from (x0,y0) to (x1,y1). Forward connections get a smooth
+# S-curve; feedback connections (destination left of source) get a right-angle
+# route through a channel below the blocks, rising vertically into the port.
 function _bezier(x0, y0, x1, y1; n=60)
     if x1 >= x0 - 0.1
         dx = max((x1 - x0) * 0.45, 0.35)
         cx0, cy0 = x0 + dx, y0
         cx1, cy1 = x1 - dx, y1
+        xs = Vector{Float64}(undef, n)
+        ys = Vector{Float64}(undef, n)
+        for i in 1:n
+            t = (i - 1) / (n - 1)
+            s = 1 - t
+            xs[i] = s^3*x0 + 3s^2*t*cx0 + 3s*t^2*cx1 + t^3*x1
+            ys[i] = s^3*y0 + 3s^2*t*cy0 + 3s*t^2*cy1 + t^3*y1
+        end
+        return xs, ys
     else
-        # Backward connection — arc below the block layout
-        spread = x0 - x1
-        drop   = max(spread * 0.4, 1.2)
-        cx0, cy0 = x0 + spread * 0.2, y0 - drop
-        cx1, cy1 = x1 - spread * 0.2, y1 - drop
+        stub = 0.3
+        drop = max((x0 - x1) * 0.12, 0.9)
+        ych  = min(y0, y1) - drop
+        return _ortho_pts([(x0, y0), (x0 + stub, y0),
+                           (x0 + stub, ych), (x1, ych), (x1, y1)])
     end
-    xs = Vector{Float64}(undef, n)
-    ys = Vector{Float64}(undef, n)
-    for i in 1:n
-        t = (i - 1) / (n - 1)
-        s = 1 - t
-        xs[i] = s^3*x0 + 3s^2*t*cx0 + 3s*t^2*cx1 + t^3*x1
-        ys[i] = s^3*y0 + 3s^2*t*cy0 + 3s*t^2*cy1 + t^3*y1
-    end
-    xs, ys
 end
 
 function _arrowhead(src::Point2f, dst::Point2f)
@@ -183,6 +206,86 @@ function _hit_connection(conn, port_pos, pos; tol = 0.12)
     return false
 end
 
+# ── Sum block (circular, Simulink-style) ──────────────────────────────────────
+
+# Angle (rad) of the i-th of ni input ports on the left arc of the circle.
+# in1 sits at the top, inN at the bottom; measured about π (the left edge).
+function _sum_input_angle(i, ni)
+    ni == 1 && return Float64(π)
+    fr     = (i - 1) / (ni - 1) - 0.5          # -0.5 (top) … +0.5 (bottom)
+    spread = min(1.8, 0.7 * (ni - 1))
+    return π + spread * fr
+end
+
+# Position of the i-th input port on the circle. A `:left` port sits on the left
+# arc; a `:bottom` port (fed by a feedback wire) sits at the bottom of the circle.
+function _sum_port_point(c, bh, i, ni, side)
+    r = bh / 2
+    θ = side === :bottom ? 3π/2 : _sum_input_angle(i, ni)
+    Point2f(c[1] + r * cos(θ), c[2] + r * sin(θ))
+end
+function _sum_glyph_point(c, bh, i, ni, side)
+    r = bh / 2
+    θ = side === :bottom ? 3π/2 : _sum_input_angle(i, ni)
+    Point2f(c[1] + 0.60r * cos(θ), c[2] + 0.60r * sin(θ))
+end
+
+# Create the scatter + sign glyph for one Sum input port. The port's `side`
+# Observable (:left / :bottom) is flipped by `_refresh_feedback_sides!` so the
+# dot, glyph and wire all follow reactively. Returns (scatter, text, side).
+function _sum_add_input!(ax, block, p, i, ni, c, bh_obs, bdr, port_pos, port_type)
+    side = Observable(:left)
+    port_pos[(block, p)]  = @lift _sum_port_point($c, $bh_obs, i, ni, $side)
+    port_type[(block, p)] = :input
+    scat = scatter!(ax, @lift([$(port_pos[(block, p)])]);
+        color = RGBf(0.25, 0.45, 0.75), markersize = PORT_PX)
+
+    glyph = block.signs[i] == '+' ? "+" : "−"
+    gpos  = @lift _sum_glyph_point($c, $bh_obs, i, ni, $side)
+    txt = text!(ax, @lift([$gpos]); text = [glyph],
+        align = (:center, :center), fontsize = 15, color = bdr)
+    return scat, txt, side
+end
+
+function _setup_sum_visual!(ax, block, c, sc, bh_obs, port_pos, port_type, bdr_color, icon_bg)
+    ni = length(block.signs)
+
+    # Filled circle; stroke colour is the selectable Observable `sc`.
+    circle_pts = @lift begin
+        r = $bh_obs / 2
+        [Point2f($c[1] + r * cos(2π * (k - 1) / 48), $c[2] + r * sin(2π * (k - 1) / 48))
+         for k in 1:48]
+    end
+    circle = poly!(ax, circle_pts; color = icon_bg, strokecolor = sc, strokewidth = 2)
+
+    # Input ports on the left arc (in1 top → inN bottom), each with its sign glyph.
+    port_plots  = Any[]
+    extras      = Any[]
+    input_sides = Dict{Symbol, Observable{Symbol}}()
+    for i in 1:ni
+        p = Symbol("in$i")
+        scat, txt, side = _sum_add_input!(ax, block, p, i, ni,
+                                           c, bh_obs, bdr_color, port_pos, port_type)
+        push!(port_plots, scat)
+        push!(extras, txt)
+        input_sides[p] = side
+    end
+
+    # Output port on the right edge.
+    port_pos[(block, :out)]  = @lift Point2f($c[1] + $bh_obs / 2, $c[2])
+    port_type[(block, :out)] = :output
+    push!(port_plots, scatter!(ax, @lift([$(port_pos[(block, :out)])]);
+        color = RGBf(0.82, 0.28, 0.22), markersize = PORT_PX))
+
+    # Name label below the circle.
+    name_pos = @lift Point2f($c[1], $c[2] - $bh_obs / 2 - 0.10)
+    label = text!(ax, @lift([$name_pos]); text = [block.name],
+        align = (:center, :top), fontsize = 10, color = RGBf(0.20, 0.20, 0.20))
+
+    return BlockVisual(nothing, nothing, circle, nothing, nothing,
+                       label, port_plots, bdr_color, extras, input_sides)
+end
+
 # ── Block and connection draw helpers ─────────────────────────────────────────
 
 function _setup_block!(ax, block, block_centers, block_strokes, block_heights, port_pos, port_type)
@@ -195,6 +298,11 @@ function _setup_block!(ax, block, block_centers, block_strokes, block_heights, p
     block_centers[block]  = c
     block_strokes[block]  = sc
     block_heights[block]  = bh_obs
+
+    if block isa SumBlock
+        return _setup_sum_visual!(ax, block, c, sc, bh_obs, port_pos, port_type,
+                                  bdr_color, icon_bg)
+    end
 
     iports = input_ports(block)
     oports = output_ports(block)
@@ -265,7 +373,8 @@ function _setup_block!(ax, block, block_centers, block_strokes, block_heights, p
                 color = RGBf(0.82, 0.28, 0.22), markersize = PORT_PX))
     end
 
-    return BlockVisual(strip, icon, border, divider, sym, label, port_plots, bdr_color)
+    return BlockVisual(strip, icon, border, divider, sym, label, port_plots, bdr_color,
+                       Any[], Dict{Symbol, Observable{Symbol}}())
 end
 
 function _add_connection_visual!(ax, conn, port_pos)
@@ -301,13 +410,11 @@ function _delete_block!(ax, diagram, block,
     remove_block!(diagram, block)
 
     bv = block_visuals[block]
-    delete!(ax, bv.strip)
-    delete!(ax, bv.icon)
-    delete!(ax, bv.border)
-    delete!(ax, bv.divider)
-    delete!(ax, bv.sym)
-    delete!(ax, bv.label)
-    for s in bv.ports; delete!(ax, s); end
+    for pl in (bv.strip, bv.icon, bv.border, bv.divider, bv.sym, bv.label)
+        pl === nothing || delete!(ax, pl)
+    end
+    for s in bv.ports;  delete!(ax, s); end
+    for e in bv.extras; delete!(ax, e); end
 
     for p in vcat(input_ports(block), output_ports(block))
         delete!(port_pos,  (block, p))
@@ -376,6 +483,95 @@ function _reconfigure_inputs!(ax, block, new_input_syms,
     # Recreate connection visuals for surviving connections.
     for conn in surviving_conns
         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+    end
+end
+
+# Reconfigure a Sum block to a new signs string: rebuilds arc input ports and
+# sign glyphs. The circle itself (bv.border) auto-resizes via bh_obs.
+function _reconfigure_sum_inputs!(ax, block, new_signs,
+                                   diagram, block_centers, block_heights,
+                                   port_pos, port_type, conn_visuals, block_visuals)
+    old_syms = [Symbol("in$i") for i in 1:length(block.signs)]
+    new_syms = [Symbol("in$i") for i in 1:length(new_signs)]
+    removed  = setdiff(Set(old_syms), Set(new_syms))
+
+    # Tear down all input-bound connection visuals; drop those on removed ports.
+    affected_conns  = filter(c -> c.dst_block === block, diagram.connections)
+    surviving_conns = Connection[]
+    for conn in affected_conns
+        cv = get(conn_visuals, conn, nothing)
+        if cv !== nothing
+            delete!(ax, cv.curve); delete!(ax, cv.arrow)
+            delete!(conn_visuals, conn)
+        end
+        if conn.dst_port in removed
+            disconnect!(diagram, conn.src_block, conn.src_port, block, conn.dst_port)
+        else
+            push!(surviving_conns, conn)
+        end
+    end
+
+    # Remove old input scatters (stored first in bv.ports) and old sign glyphs.
+    bv    = block_visuals[block]
+    n_old = length(old_syms)
+    for i in 1:n_old; delete!(ax, bv.ports[i]); end
+    bv.ports = bv.ports[n_old+1:end]           # keep the output scatter
+    for e in bv.extras; delete!(ax, e); end
+    bv.extras = Any[]
+
+    for p in old_syms
+        delete!(port_pos,  (block, p))
+        delete!(port_type, (block, p))
+    end
+
+    # Update model, then resize circle via bh_obs.
+    block.signs       = new_signs
+    block.base.inputs = Dict(sym => Port(sym, 0.0) for sym in new_syms)
+    bh_obs = block_heights[block]
+    bh_obs[] = _block_height(block)
+
+    # Rebuild input ports + sign glyphs.
+    c  = block_centers[block]
+    ni = length(new_syms)
+    new_plots, new_extras = Any[], Any[]
+    new_sides = Dict{Symbol, Observable{Symbol}}()
+    for i in 1:ni
+        p = new_syms[i]
+        scat, txt, side = _sum_add_input!(ax, block, p, i, ni,
+                                           c, bh_obs, bv.border_color, port_pos, port_type)
+        push!(new_plots, scat)
+        push!(new_extras, txt)
+        new_sides[p] = side
+    end
+    bv.ports       = vcat(new_plots, bv.ports)
+    bv.extras      = new_extras
+    bv.input_sides = new_sides
+
+    for conn in surviving_conns
+        conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+    end
+end
+
+# Re-evaluate which Sum inputs are fed by feedback (backward) wires and move
+# those ports to the bottom of the circle; all others sit on the left arc.
+# Idempotent — safe to call after any topology or position change.
+function _refresh_feedback_sides!(diagram, block_centers, block_visuals)
+    for (blk, bv) in block_visuals
+        blk isa SumBlock || continue
+        for (_, side) in bv.input_sides
+            side[] === :left || (side[] = :left)
+        end
+    end
+    for c in diagram.connections
+        c.dst_block isa SumBlock || continue
+        (haskey(block_centers, c.src_block) && haskey(block_centers, c.dst_block)) || continue
+        if block_centers[c.src_block][][1] > block_centers[c.dst_block][][1]   # feedback
+            bv = get(block_visuals, c.dst_block, nothing)
+            bv === nothing && continue
+            side = get(bv.input_sides, c.dst_port, nothing)
+            side === nothing && continue
+            side[] === :bottom || (side[] = :bottom)
+        end
     end
 end
 
@@ -652,16 +848,12 @@ function _open_props_window!(block, block_visuals, prop_screens,
         add_field!("k", string(block.k),
             s -> block.k = parse(Float64, s))
     elseif block isa SumBlock
-        add_field!("Signs", block.signs, s -> begin
-            all(c -> c == '+' || c == '-', s) || return
-            isempty(s) && return
-            if length(s) != length(block.signs)
-                new_syms = [Symbol("in$i") for i in 1:length(s)]
-                _reconfigure_inputs!(ax, block, new_syms, diagram,
-                    block_centers, block_heights, port_pos, port_type,
-                    conn_visuals, block_visuals)
-            end
-            block.signs = s
+        add_field!("Signs (+/−)", block.signs, s -> begin
+            (isempty(s) || !all(c -> c == '+' || c == '-', s)) && return
+            _reconfigure_sum_inputs!(ax, block, s, diagram,
+                block_centers, block_heights, port_pos, port_type,
+                conn_visuals, block_visuals)
+            _refresh_feedback_sides!(diagram, block_centers, block_visuals)
         end)
     elseif block isa IntegratorBlock
         add_field!("x0 (init)", string(block.x0), s -> begin
@@ -779,28 +971,37 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         displayed_string = "diagram.json", width = 130, fontsize = 11)
     on(tb_filename.stored_string) do s; s === nothing || (filename_ref[] = s); end
 
-    Label(toolbar[1, 5], " │"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Label(toolbar[1, 5], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+
+    # Edit history (before Run, per Simulink layout)
+    btn_undo = Button(toolbar[1, 6]; label = "↶ Undo")
+    btn_redo = Button(toolbar[1, 7]; label = "↷ Redo")
+
+    Label(toolbar[1, 8], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
 
     # Run controls
-    btn_run  = Button(toolbar[1, 6]; label = "▶  Run",
+    btn_run  = Button(toolbar[1, 9]; label = "▶  Run",
         buttoncolor = RGBf(0.22, 0.62, 0.32), labelcolor = :white)
-    Button(toolbar[1, 7]; label = "■ Stop")   # UI placeholder, no handler
-    btn_clear = Button(toolbar[1, 8]; label = "✕  Clear")
+    Button(toolbar[1, 10]; label = "■ Stop")   # UI placeholder, no handler
+    btn_clear = Button(toolbar[1, 11]; label = "✕  Clear")
 
-    Label(toolbar[1, 9], " │"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Label(toolbar[1, 12], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
 
     # Simulation time parameters
-    Label(toolbar[1, 10], "t₀:"; tellwidth = false, fontsize = 12)
-    tb_tstart = Textbox(toolbar[1, 11];
+    Label(toolbar[1, 13], "t₀:"; tellwidth = false, fontsize = 12)
+    tb_tstart = Textbox(toolbar[1, 14];
         displayed_string = string(diagram.config.tspan[1]), width = 60)
-    Label(toolbar[1, 12], "tstop:"; tellwidth = false, fontsize = 12)
-    tb_tend   = Textbox(toolbar[1, 13];
+    Label(toolbar[1, 15], "tstop:"; tellwidth = false, fontsize = 12)
+    tb_tend   = Textbox(toolbar[1, 16];
         displayed_string = string(diagram.config.tspan[2]), width = 60)
-    Label(toolbar[1, 14], "Δt:"; tellwidth = false, fontsize = 12)
-    tb_dt     = Textbox(toolbar[1, 15];
+    Label(toolbar[1, 17], "Δt:"; tellwidth = false, fontsize = 12)
+    tb_dt     = Textbox(toolbar[1, 18];
         displayed_string = string(diagram.config.dt), width = 60)
 
-    Label(toolbar[1, 16], ""; tellwidth = true)   # flex spacer
+    # Flexible trailing spacer absorbs all slack → toolbar items pack to the left.
+    Label(toolbar[1, 19], ""; tellwidth = false)
+    colsize!(toolbar, 19, Auto(false))
+    colgap!(toolbar, 6)
 
     # ── Row 2: palette | canvas ───────────────────────────────────────────────
     palette_grid = GridLayout(fig[2, 1])
@@ -875,6 +1076,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     for conn in diagram.connections
         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
     end
+    _refresh_feedback_sides!(diagram, block_centers, block_visuals)
 
     # ── Rubber-band wire ──────────────────────────────────────────────────────
     wire_active = Observable(false)
@@ -961,12 +1163,14 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             delete!(conn_visuals, conn)
         end
         disconnect!(diagram, sb, sp, db, dp)
+        _refresh_feedback_sides!(diagram, block_centers, block_visuals)
     end
 
     function _add_conn_visual!(sb, sp, db, dp)
         connect!(diagram, sb, sp, db, dp)
         conn = diagram.connections[end]
         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+        _refresh_feedback_sides!(diagram, block_centers, block_visuals)
     end
 
     function _apply_action!(action::AddBlockAction, forward::Bool)
@@ -1000,6 +1204,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         pos = forward ? action.new_pos : action.old_pos
         action.block.position = pos
         block_centers[action.block][] = Point2f(pos...)
+        _refresh_feedback_sides!(diagram, block_centers, block_visuals)
     end
 
     function _apply_action!(action::AddConnectionAction, forward::Bool)
@@ -1052,6 +1257,9 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         end
     end
 
+    on(btn_undo.clicks) do _; do_undo!(); end
+    on(btn_redo.clicks) do _; do_redo!(); end
+
     register_interaction!(ax, :diagram_interaction) do event::MouseEvent, _
         pos = event.data
 
@@ -1071,6 +1279,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                         connect!(diagram, src_block, src_port, dst_block, dst_port)
                         conn = diagram.connections[end]
                         conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
+                        _refresh_feedback_sides!(diagram, block_centers, block_visuals)
                         _push_undo!(AddConnectionAction(src_block, src_port, dst_block, dst_port))
                         status[] = "Connected $(src_block.name):$(src_port) → $(dst_block.name):$(dst_port)"
                     catch e
@@ -1155,6 +1364,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 selected[].position = new_pos
                 if new_pos != old_pos
                     _push_undo!(MoveBlockAction(selected[], old_pos, new_pos))
+                    _refresh_feedback_sides!(diagram, block_centers, block_visuals)
                 end
             end
         end
@@ -1184,6 +1394,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 delete!(conn_visuals, conn)
                 disconnect!(diagram, conn.src_block, conn.src_port,
                             conn.dst_block, conn.dst_port)
+                _refresh_feedback_sides!(diagram, block_centers, block_visuals)
                 status[] = "Connection deleted"
             elseif selected[] !== nothing
                 block = selected[]
@@ -1196,6 +1407,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                     block_centers, block_strokes, block_heights,
                     port_pos, port_type, block_visuals, conn_visuals)
                 _push_undo!(DeleteBlockAction(block, removed))
+                _refresh_feedback_sides!(diagram, block_centers, block_visuals)
                 status[] = "Block deleted"
             end
         end
@@ -1381,6 +1593,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
                 conn = diagram.connections[end]
                 conn_visuals[conn] = _add_connection_visual!(ax, conn, port_pos)
             end
+            _refresh_feedback_sides!(diagram, block_centers, block_visuals)
             status[] = "Loaded $path — $(length(diagram.blocks)) blocks, $(length(diagram.connections)) connections"
         catch e
             status[] = "Load failed: $(sprint(showerror, e))"
