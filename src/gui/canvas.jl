@@ -9,7 +9,7 @@ import ..BlocksSources: ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlo
 import ..BlocksMath: GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
                     ProductBlock, SaturationBlock, AbsBlock,
                     DerivativeBlock, PIDBlock, LookupTable1DBlock,
-                    TransferFnBlock, StateSpaceBlock
+                    TransferFnBlock, StateSpaceBlock, set_tf_coeffs!
 import ..BlocksSinks: ScopeBlock, WorkspaceBlock, TerminatorBlock
 import ..Runner: simulate
 using JSON3
@@ -32,6 +32,27 @@ const _AMGR_BORDER = RGBf(0.75, 0.40, 0.05)
 const _AMGR_ICON   = RGBf(0.99, 0.95, 0.88)
 const _GRNN_BORDER = RGBf(0.20, 0.60, 0.25)
 const _GRNN_ICON   = RGBf(0.92, 0.98, 0.93)
+
+# UI chrome palette (Section 5 wireframe — "GLMakie-realistic editor")
+const _WIN_BG     = RGBf(0.914, 0.914, 0.914)   # #e9e9e9 window background
+const _TB_BG      = RGBf(0.871, 0.871, 0.871)   # #dedede toolbar / title strips
+const _PANEL_BG   = RGBf(0.953, 0.953, 0.953)   # #f3f3f3 palette / dialog body
+const _PANEL_BRD  = RGBf(0.706, 0.706, 0.706)   # #b4b4b4 panel borders
+const _BTN_BG     = RGBf(0.831, 0.831, 0.831)   # #d4d4d4 button face
+const _BTN_BRD    = RGBf(0.620, 0.620, 0.620)   # #9e9e9e button border
+const _RUN_GREEN  = RGBf(0.184, 0.620, 0.357)   # #2f9e5b Run button
+const _RUN_BRD    = RGBf(0.149, 0.502, 0.286)   # #268049 Run button border
+const _MAKIE_BLUE = RGBf(0.000, 0.447, 0.698)   # #0072B2 accent (toggles, chips, Apply)
+const _CHIP_BRD   = RGBf(0.769, 0.769, 0.769)   # #c4c4c4 palette chip border
+const _INK        = RGBf(0.122, 0.122, 0.122)   # #1f1f1f primary text
+const _MUTED      = RGBf(0.267, 0.267, 0.267)   # #444444 secondary text / field labels
+const _CANVAS_GRID = RGBf(0.86, 0.86, 0.86)     # neutral grid dots on white canvas
+const _PAL_CHIP_W  = 180   # palette chip width: 236 − 2×10 pad − 28 icon col − 8 gap
+
+# Default canvas view extents; the toolbar zoom percentage is relative to this
+# x-span (100% = the default view).
+const _CANVAS_XLIM = (-2.0, 14.0)
+const _CANVAS_YLIM = (-6.0, 6.0)
 
 _block_height(block) =
     max(BLOCK_H, PORT_HIT * 1.4 * (max(length(input_ports(block)),
@@ -773,6 +794,15 @@ end
 
 # ── Properties window ─────────────────────────────────────────────────────────
 
+# "1, 0.8 1" → [1.0, 0.8, 1.0]; empty vector signals a parse failure
+function _parse_coeffs(s::AbstractString)
+    try
+        return parse.(Float64, split(s, r"[,\s]+"; keepempty = false))
+    catch
+        return Float64[]
+    end
+end
+
 function _open_props_window!(block, block_visuals, prop_screens,
                              ax, diagram, block_centers, block_heights,
                              port_pos, port_type, conn_visuals)
@@ -783,72 +813,84 @@ function _open_props_window!(block, block_visuals, prop_screens,
     end
 
     bv  = block_visuals[block]
-    fig = Figure(size = (320, 400))
-    g   = GridLayout(fig[1, 1])
+    fig = Figure(size = (360, 430), backgroundcolor = _PANEL_BG,
+        figure_padding = 0)
 
-    # Title bar style header
-    Label(g[1, 1:2], "Block Parameters — " * string(nameof(typeof(block)));
-        fontsize = 13, halign = :left, font = :bold,
-        color = RGBf(0.15, 0.15, 0.15))
+    # Title strip (Section 5: 34 px, #dedede, 1 px border)
+    Box(fig[1, 1]; color = _TB_BG, strokecolor = _PANEL_BRD, strokewidth = 1)
+    Label(fig[1, 1], "Block Parameters — " * block.name;
+        fontsize = 13, font = :bold, halign = :left, padding = (12, 0, 0, 0),
+        color = _INK, tellwidth = false)
+    rowsize!(fig.layout, 1, Fixed(34))
+    rowgap!(fig.layout, 0)
 
-    # Thin separator
-    Label(g[2, 1:2], ""; fontsize = 2)
+    # Field grid: 104 px label column + white textboxes (Section 5)
+    g = GridLayout(fig[2, 1]; alignmode = Outside(14), valign = :top,
+        tellheight = false)
+    colsize!(g, 1, Fixed(104))
+    rowgap!(g, 11)
 
-    row = Ref(3)
+    # Fields commit on Apply (Section 5 Apply/Cancel semantics): each entry
+    # reads its textbox's current text and writes it into the block.
+    appliers = Function[]
+    row = Ref(1)
 
-    function add_field!(fname, value, on_commit)
+    function add_field!(fname, value; commit = nothing)
         r = row[]
-        Label(g[r, 1], fname * ":"; halign = :right, fontsize = 12)
-        tb = Textbox(g[r, 2]; displayed_string = value, tellwidth = false, fontsize = 12)
-        on(tb.stored_string) do s
-            s === nothing && return
-            try; on_commit(s); catch _; end
-        end
         row[] += 1
+        Label(g[r, 1], fname; halign = :left, fontsize = 12, color = _MUTED,
+            tellwidth = true)
+        # Explicit width — a Textbox does not stretch to fill its grid cell,
+        # long values would otherwise overflow the drawn box.
+        tb = Textbox(g[r, 2]; displayed_string = value, tellwidth = false,
+            width = 205, fontsize = 12, height = 28, boxcolor = :white,
+            bordercolor = _BTN_BRD)
+        commit === nothing || push!(appliers, () -> commit(tb.displayed_string[]))
+        return tb
     end
 
     function add_info!(text)
         Label(g[row[], 1:2], text; fontsize = 11, halign = :left,
-              color = RGBf(0.40, 0.40, 0.40))
+              color = RGBf(0.40, 0.40, 0.40), tellwidth = false)
         row[] += 1
     end
 
-    add_field!("Name", block.name, s -> begin
+    add_field!("Name", block.name; commit = s -> begin
         block.name = s
         bv.label.text[] = [s]
     end)
 
     if block isa ConstantBlock
-        add_field!("Value", string(block.value),
-            s -> block.value = parse(Float64, s))
+        add_field!("Value", string(block.value);
+            commit = s -> block.value = parse(Float64, s))
     elseif block isa StepBlock
-        add_field!("Step time", string(block.step_time),
-            s -> block.step_time = parse(Float64, s))
-        add_field!("Before",    string(block.before),
-            s -> block.before    = parse(Float64, s))
-        add_field!("After",     string(block.after),
-            s -> block.after     = parse(Float64, s))
+        add_field!("Step time", string(block.step_time);
+            commit = s -> block.step_time = parse(Float64, s))
+        add_field!("Before",    string(block.before);
+            commit = s -> block.before    = parse(Float64, s))
+        add_field!("After",     string(block.after);
+            commit = s -> block.after     = parse(Float64, s))
     elseif block isa SineBlock
-        add_field!("Amplitude", string(block.amplitude),
-            s -> block.amplitude = parse(Float64, s))
-        add_field!("Frequency", string(block.frequency),
-            s -> block.frequency = parse(Float64, s))
-        add_field!("Phase",     string(block.phase),
-            s -> block.phase     = parse(Float64, s))
-        add_field!("Offset",    string(block.offset),
-            s -> block.offset    = parse(Float64, s))
+        add_field!("Amplitude", string(block.amplitude);
+            commit = s -> block.amplitude = parse(Float64, s))
+        add_field!("Frequency", string(block.frequency);
+            commit = s -> block.frequency = parse(Float64, s))
+        add_field!("Phase",     string(block.phase);
+            commit = s -> block.phase     = parse(Float64, s))
+        add_field!("Offset",    string(block.offset);
+            commit = s -> block.offset    = parse(Float64, s))
     elseif block isa RampBlock
-        add_field!("Slope",      string(block.slope),
-            s -> block.slope      = parse(Float64, s))
-        add_field!("Start time", string(block.start_time),
-            s -> block.start_time = parse(Float64, s))
-        add_field!("Bias",       string(block.bias),
-            s -> block.bias       = parse(Float64, s))
+        add_field!("Slope",      string(block.slope);
+            commit = s -> block.slope      = parse(Float64, s))
+        add_field!("Start time", string(block.start_time);
+            commit = s -> block.start_time = parse(Float64, s))
+        add_field!("Bias",       string(block.bias);
+            commit = s -> block.bias       = parse(Float64, s))
     elseif block isa GainBlock
-        add_field!("k", string(block.k),
-            s -> block.k = parse(Float64, s))
+        add_field!("k", string(block.k);
+            commit = s -> block.k = parse(Float64, s))
     elseif block isa SumBlock
-        add_field!("Signs (+/−)", block.signs, s -> begin
+        add_field!("Signs (+/−)", block.signs; commit = s -> begin
             (isempty(s) || !all(c -> c == '+' || c == '-', s)) && return
             _reconfigure_sum_inputs!(ax, block, s, diagram,
                 block_centers, block_heights, port_pos, port_type,
@@ -856,43 +898,43 @@ function _open_props_window!(block, block_visuals, prop_screens,
             _refresh_feedback_sides!(diagram, block_centers, block_visuals)
         end)
     elseif block isa IntegratorBlock
-        add_field!("x0 (init)", string(block.x0), s -> begin
+        add_field!("x0 (init)", string(block.x0); commit = s -> begin
             v = parse(Float64, s)
             block.x0         = v
             block.state      = v
             block.next_state = v
         end)
     elseif block isa UnitDelayBlock
-        add_field!("x0 (init)", string(block.x0), s -> begin
+        add_field!("x0 (init)", string(block.x0); commit = s -> begin
             v = parse(Float64, s)
             block.x0         = v
             block.state      = v
             block.next_state = v
         end)
     elseif block isa SaturationBlock
-        add_field!("Lower", string(block.lower),
-            s -> block.lower = parse(Float64, s))
-        add_field!("Upper", string(block.upper),
-            s -> block.upper = parse(Float64, s))
+        add_field!("Lower", string(block.lower);
+            commit = s -> block.lower = parse(Float64, s))
+        add_field!("Upper", string(block.upper);
+            commit = s -> block.upper = parse(Float64, s))
     elseif block isa DerivativeBlock
-        add_field!("N (bandwidth)", string(block.N),
-            s -> block.N = parse(Float64, s))
+        add_field!("N (bandwidth)", string(block.N);
+            commit = s -> block.N = parse(Float64, s))
     elseif block isa PIDBlock
-        add_field!("Kp",      string(block.Kp),
-            s -> block.Kp      = parse(Float64, s))
-        add_field!("Ki",      string(block.Ki),
-            s -> block.Ki      = parse(Float64, s))
-        add_field!("Kd",      string(block.Kd),
-            s -> block.Kd      = parse(Float64, s))
-        add_field!("N",       string(block.N),
-            s -> block.N       = parse(Float64, s))
-        add_field!("Out min", string(block.out_min),
-            s -> block.out_min = parse(Float64, s))
-        add_field!("Out max", string(block.out_max),
-            s -> block.out_max = parse(Float64, s))
+        add_field!("Kp",      string(block.Kp);
+            commit = s -> block.Kp      = parse(Float64, s))
+        add_field!("Ki",      string(block.Ki);
+            commit = s -> block.Ki      = parse(Float64, s))
+        add_field!("Kd",      string(block.Kd);
+            commit = s -> block.Kd      = parse(Float64, s))
+        add_field!("N",       string(block.N);
+            commit = s -> block.N       = parse(Float64, s))
+        add_field!("Out min", string(block.out_min);
+            commit = s -> block.out_min = parse(Float64, s))
+        add_field!("Out max", string(block.out_max);
+            commit = s -> block.out_max = parse(Float64, s))
     elseif block isa ScopeBlock
-        add_field!("Title", block.title, s -> block.title = s)
-        add_field!("Ports (1–3)", string(block.n_ports), s -> begin
+        add_field!("Title", block.title; commit = s -> block.title = s)
+        add_field!("Ports (1–3)", string(block.n_ports); commit = s -> begin
             n = clamp(parse(Int, s), 1, 3)
             if n != block.n_ports
                 new_syms = [Symbol("in$i") for i in 1:n]
@@ -908,23 +950,52 @@ function _open_props_window!(block, block_visuals, prop_screens,
     elseif block isa LookupTable1DBlock
         add_info!("$(length(block.bp))-pt table (edit breakpoints in code)")
     elseif block isa TransferFnBlock
-        add_info!("num: [$(join(block.num, ", "))]")
-        add_info!("den: [$(join(block.den, ", "))]")
-        add_info!("Order: $(length(block.den) - 1)")
+        # num and den commit together so a change spanning both fields cannot
+        # be rejected half-applied (e.g. raising the order of num and den).
+        tb_num = add_field!("Numerator",   join(block.num, ", "))
+        tb_den = add_field!("Denominator", join(block.den, ", "))
+        add_info!("H(s) = num(s)/den(s), coefficients high → low order")
+        push!(appliers, () -> begin
+            num = _parse_coeffs(tb_num.displayed_string[])
+            den = _parse_coeffs(tb_den.displayed_string[])
+            (isempty(num) || isempty(den)) && return
+            (num == block.num && den == block.den) && return
+            set_tf_coeffs!(block, num, den)
+        end)
     elseif block isa StateSpaceBlock
         add_info!("Order: $(size(block.A_c, 1)) state(s)")
         add_info!("D = $(block.D_c)")
     end
 
-    # Close button
+    # Apply / Cancel (Section 5): Apply commits every field, then closes.
     screen_ref = Ref{Any}(nothing)
-    btn_close = Button(g[row[], 1:2]; label = "Close", tellwidth = false)
-    on(btn_close.clicks) do _
+    function _close_win!()
         s = screen_ref[]
         s === nothing && return
         try; s.window_open[] && close(s); catch _; end
         delete!(prop_screens, block)
     end
+    btns = GridLayout(g[row[], 1:2]; halign = :right, tellwidth = false)
+    colgap!(btns, 8)
+    btn_apply  = Button(btns[1, 1]; label = "Apply", height = 30, fontsize = 12,
+        buttoncolor = _MAKIE_BLUE, strokecolor = RGBf(0.0, 0.361, 0.565),
+        strokewidth = 1, labelcolor = :white)
+    btn_cancel = Button(btns[1, 2]; label = "Cancel", height = 30, fontsize = 12,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1,
+        labelcolor = _INK)
+    on(btn_apply.clicks) do _
+        for f in appliers
+            try; f(); catch _; end
+        end
+        _close_win!()
+    end
+    on(btn_cancel.clicks) do _
+        _close_win!()
+    end
+
+    # Size the window to its content: title strip + padding + one 39 px slot
+    # per grid row (28 px field + 11 px gap), clamped to sane bounds.
+    resize!(fig, 360, clamp(96 + 39 * row[], 200, 620))
 
     screen = GLMakie.Screen(title = "Block Parameters — $(block.name)")
     screen_ref[] = screen
@@ -956,100 +1027,140 @@ Interactions:
 """
 function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     _res = try; GLMakie.primary_resolution(); catch; (1600, 900); end
-    fig = Figure(size = (round(Int, _res[1] * 0.92), round(Int, _res[2] * 0.88)))
+    fig = Figure(size = (round(Int, _res[1] * 0.92), round(Int, _res[2] * 0.88)),
+        backgroundcolor = _WIN_BG, figure_padding = 0)
 
-    # ── Row 1: single toolbar ────────────────────────────────────────────────
-    toolbar = GridLayout(fig[1, 1:2])
-    rowsize!(fig.layout, 1, Auto(false))
+    # Panel background fills (Section 5 wireframe colors). Created before the
+    # widgets that share their grid cells so they render behind them.
+    Box(fig[1, 1:2]; color = _TB_BG,    strokecolor = _PANEL_BRD, strokewidth = 1)
+    pal_box = Box(fig[2, 1]; color = _PANEL_BG, strokecolor = _PANEL_BRD, strokewidth = 1)
+    Box(fig[3, 1:2]; color = _TB_BG,    strokecolor = _PANEL_BRD, strokewidth = 1)
+
+    # ── Row 1: single toolbar (46 px strip, 30 px buttons — Section 5) ───────
+    toolbar = GridLayout(fig[1, 1:2]; alignmode = Outside(8))
+    rowsize!(fig.layout, 1, Fixed(46))
 
     # File operations
-    btn_new  = Button(toolbar[1, 1]; label = "New")
-    btn_save = Button(toolbar[1, 2]; label = "Save")
-    btn_load = Button(toolbar[1, 3]; label = "Load")
+    btn_new  = Button(toolbar[1, 1]; label = "New", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
+    btn_save = Button(toolbar[1, 2]; label = "Save", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
+    btn_load = Button(toolbar[1, 3]; label = "Load", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
     filename_ref = Ref{String}("diagram.json")
     tb_filename  = Textbox(toolbar[1, 4];
-        displayed_string = "diagram.json", width = 130, fontsize = 11)
+        displayed_string = "diagram.json", width = 130, height = 28, fontsize = 11,
+        boxcolor = :white, bordercolor = _BTN_BRD)
     on(tb_filename.stored_string) do s; s === nothing || (filename_ref[] = s); end
 
-    Label(toolbar[1, 5], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    # Toolbar items must report their width; otherwise their columns share
+    # leftover space with the trailing spacer and items spread out.
+    Box(toolbar[1, 5]; width = 1, height = 26, color = _PANEL_BRD, strokewidth = 0)
 
     # Edit history (before Run, per Simulink layout)
-    btn_undo = Button(toolbar[1, 6]; label = "↶ Undo")
-    btn_redo = Button(toolbar[1, 7]; label = "↷ Redo")
+    btn_undo = Button(toolbar[1, 6]; label = "↶ Undo", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
+    btn_redo = Button(toolbar[1, 7]; label = "↷ Redo", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
 
-    Label(toolbar[1, 8], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Box(toolbar[1, 8]; width = 1, height = 26, color = _PANEL_BRD, strokewidth = 0)
 
     # Run controls
-    btn_run  = Button(toolbar[1, 9]; label = "▶  Run",
-        buttoncolor = RGBf(0.22, 0.62, 0.32), labelcolor = :white)
-    Button(toolbar[1, 10]; label = "■ Stop")   # UI placeholder, no handler
-    btn_clear = Button(toolbar[1, 11]; label = "✕  Clear")
+    btn_run  = Button(toolbar[1, 9]; label = "▶  Run", height = 30,
+        buttoncolor = _RUN_GREEN, strokecolor = _RUN_BRD, strokewidth = 1,
+        labelcolor = :white)
+    Button(toolbar[1, 10]; label = "■ Stop", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1,
+        labelcolor = _INK)   # UI placeholder, no handler
+    btn_clear = Button(toolbar[1, 11]; label = "✕  Clear", height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
 
-    Label(toolbar[1, 12], "│"; tellwidth = false, color = RGBf(0.75, 0.75, 0.75))
+    Box(toolbar[1, 12]; width = 1, height = 26, color = _PANEL_BRD, strokewidth = 0)
 
     # Simulation time parameters
-    Label(toolbar[1, 13], "t₀:"; tellwidth = false, fontsize = 12)
+    Label(toolbar[1, 13], "t₀:"; tellwidth = true, fontsize = 12, color = _MUTED)
     tb_tstart = Textbox(toolbar[1, 14];
-        displayed_string = string(diagram.config.tspan[1]), width = 60)
-    Label(toolbar[1, 15], "tstop:"; tellwidth = false, fontsize = 12)
+        displayed_string = string(diagram.config.tspan[1]), width = 54, height = 28,
+        boxcolor = :white, bordercolor = _BTN_BRD)
+    Label(toolbar[1, 15], "tstop:"; tellwidth = true, fontsize = 12, color = _MUTED)
     tb_tend   = Textbox(toolbar[1, 16];
-        displayed_string = string(diagram.config.tspan[2]), width = 60)
-    Label(toolbar[1, 17], "Δt:"; tellwidth = false, fontsize = 12)
+        displayed_string = string(diagram.config.tspan[2]), width = 54, height = 28,
+        boxcolor = :white, bordercolor = _BTN_BRD)
+    Label(toolbar[1, 17], "Δt:"; tellwidth = true, fontsize = 12, color = _MUTED)
     tb_dt     = Textbox(toolbar[1, 18];
-        displayed_string = string(diagram.config.dt), width = 60)
+        displayed_string = string(diagram.config.dt), width = 54, height = 28,
+        boxcolor = :white, bordercolor = _BTN_BRD)
 
-    # Flexible trailing spacer absorbs all slack → toolbar items pack to the left.
+    # Flexible trailing spacer absorbs all slack → the left groups pack left
+    # and the zoom cluster (placed after the spacer) sits at the right edge.
     Label(toolbar[1, 19], ""; tellwidth = false)
     colsize!(toolbar, 19, Auto(false))
+
+    # Zoom cluster: − 100% + (Section 5); handlers attached after the Axis exists
+    zoom_pct = Observable("100%")
+    btn_zoom_out = Button(toolbar[1, 20]; label = "−", width = 30, height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
+    Label(toolbar[1, 21], zoom_pct; fontsize = 12, color = _MUTED, tellwidth = true)
+    btn_zoom_in  = Button(toolbar[1, 22]; label = "+", width = 30, height = 30,
+        buttoncolor = _BTN_BG, strokecolor = _BTN_BRD, strokewidth = 1, labelcolor = _INK)
+
     colgap!(toolbar, 6)
 
     # ── Row 2: palette | canvas ───────────────────────────────────────────────
-    palette_grid = GridLayout(fig[2, 1])
+    # tellheight = false so the palette never determines the canvas row height;
+    # valign = :top packs the content up and leaves slack at the bottom.
+    palette_grid = GridLayout(fig[2, 1];
+        alignmode = Outside(10), valign = :top, tellheight = false)
 
     # Row 1: header
     Label(palette_grid[1, 1:2], "Block Library";
         fontsize = 13, font = :bold, halign = :left,
-        color = RGBf(0.15, 0.15, 0.15))
+        color = _INK, tellwidth = false)
 
     # Row 2: category dropdown (Menu)
     cat_menu = Menu(palette_grid[2, 1:2];
-        options  = ["All", "Sources", "Math", "Sinks"],
-        default  = "All",
-        tellwidth = true)
+        options  = ["All categories", "Sources", "Math", "Sinks"],
+        default  = "All categories",
+        height = 28, fontsize = 12, tellwidth = true)
 
     # Row 3: search textbox
     tb_search = Textbox(palette_grid[3, 1:2];
-        displayed_string = "", tellwidth = true, fontsize = 11)
+        placeholder = "Search…", tellwidth = true, fontsize = 12,
+        height = 28, boxcolor = :white, bordercolor = _BTN_BRD)
 
     colsize!(palette_grid, 1, Fixed(28))
     colsize!(palette_grid, 2, Auto())
+    colgap!(palette_grid, 8)
+    rowgap!(palette_grid, 6)
 
-    # Canvas axis (dot-grid background; keeps existing warm-white dot style)
+    # Canvas axis (white background + neutral dot grid — Section 5)
     ax = Axis(fig[2, 2];
-        leftspinecolor   = RGBf(0.89, 0.88, 0.85),
-        rightspinecolor  = RGBf(0.89, 0.88, 0.85),
-        bottomspinecolor = RGBf(0.89, 0.88, 0.85),
-        topspinecolor    = RGBf(0.89, 0.88, 0.85),
+        leftspinecolor   = RGBf(0.812, 0.812, 0.812),
+        rightspinecolor  = RGBf(0.812, 0.812, 0.812),
+        bottomspinecolor = RGBf(0.812, 0.812, 0.812),
+        topspinecolor    = RGBf(0.812, 0.812, 0.812),
         spinewidth       = 1,
-        backgroundcolor  = RGBf(0.98, 0.98, 0.97))
+        backgroundcolor  = RGBf(1.0, 1.0, 1.0))
     hidedecorations!(ax)
-    limits!(ax, -2.0, 14.0, -6.0, 6.0)
+    limits!(ax, _CANVAS_XLIM..., _CANVAS_YLIM...)
 
     let xs = Float64[], ys = Float64[]
-        for x in -2.0:0.5:14.0, y in -6.0:0.5:6.0
+        for x in _CANVAS_XLIM[1]:0.5:_CANVAS_XLIM[2], y in _CANVAS_YLIM[1]:0.5:_CANVAS_YLIM[2]
             push!(xs, x); push!(ys, y)
         end
-        scatter!(ax, xs, ys; color = RGBf(0.79, 0.82, 0.87), markersize = 3)
+        scatter!(ax, xs, ys; color = _CANVAS_GRID, markersize = 3)
     end
 
     colsize!(fig.layout, 1, Fixed(236))
     colsize!(fig.layout, 2, Auto())
-    rowsize!(fig.layout, 2, Relative(0.88))
+    rowgap!(fig.layout, 0)
+    colgap!(fig.layout, 0)
 
     # ── Row 3: status bar ─────────────────────────────────────────────────────
     status = Observable("Build a diagram, then click ▶ Run")
-    Label(fig[3, 1:2], status; tellwidth = false, fontsize = 12)
-    rowsize!(fig.layout, 3, Auto(false))
+    Label(fig[3, 1:2], status; tellwidth = false, fontsize = 12,
+        halign = :left, padding = (12, 0, 0, 0), color = _MUTED)
+    rowsize!(fig.layout, 3, Fixed(28))
 
     deregister_interaction!(ax, :rectanglezoom)
 
@@ -1134,8 +1245,22 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     function _deselect!()
         _deselect_conn!()
         if selected[] !== nothing
-            block_strokes[selected[]][] = block_visuals[selected[]].border_color
+            # Defensive get: the selected block may already have been removed
+            # (e.g. by undo/redo), leaving a stale reference in `selected`.
+            bv = get(block_visuals, selected[], nothing)
+            st = get(block_strokes, selected[], nothing)
+            (bv !== nothing && st !== nothing) && (st[] = bv.border_color)
             selected[] = nothing
+        end
+    end
+
+    # Clear selection state that points at objects a structural edit (undo/
+    # redo) is about to remove — stale refs crash later dict lookups.
+    function _drop_stale_selection!(block)
+        selected[] === block && (selected[] = nothing)
+        sc = selected_conn[]
+        if sc !== nothing && (sc.src_block === block || sc.dst_block === block)
+            selected_conn[] = nothing
         end
     end
 
@@ -1157,6 +1282,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     function _remove_conn_visual!(sb, sp, db, dp)
         conn = _find_conn(sb, sp, db, dp)
         conn === nothing && return
+        selected_conn[] === conn && (selected_conn[] = nothing)
         cv = get(conn_visuals, conn, nothing)
         if cv !== nothing
             delete!(ax, cv.curve); delete!(ax, cv.arrow)
@@ -1179,6 +1305,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             block_visuals[action.block] = _setup_block!(ax, action.block,
                 block_centers, block_strokes, block_heights, port_pos, port_type)
         else
+            _drop_stale_selection!(action.block)
             _delete_block!(ax, diagram, action.block,
                 block_centers, block_strokes, block_heights,
                 port_pos, port_type, block_visuals, conn_visuals)
@@ -1187,6 +1314,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
 
     function _apply_action!(action::DeleteBlockAction, forward::Bool)
         if forward
+            _drop_stale_selection!(action.block)
             _delete_block!(ax, diagram, action.block,
                 block_centers, block_strokes, block_heights,
                 port_pos, port_type, block_visuals, conn_visuals)
@@ -1232,6 +1360,8 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             status[] = "Nothing to undo"
             return
         end
+        # A wire in progress may originate from a block the action removes
+        wire_active[] && _cancel_wire!()
         action = pop!(undo_stack)
         try
             _apply_action!(action, false)
@@ -1247,6 +1377,7 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             status[] = "Nothing to redo"
             return
         end
+        wire_active[] && _cancel_wire!()
         action = pop!(redo_stack)
         try
             _apply_action!(action, true)
@@ -1385,17 +1516,21 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         elseif ev.key == Keyboard.delete && !wire_active[]
             if selected_conn[] !== nothing
                 conn = selected_conn[]
-                _push_undo!(DeleteConnectionAction(conn.src_block, conn.src_port,
-                                                   conn.dst_block, conn.dst_port))
                 _deselect_conn!()
-                cv = conn_visuals[conn]
-                delete!(ax, cv.curve)
-                delete!(ax, cv.arrow)
-                delete!(conn_visuals, conn)
-                disconnect!(diagram, conn.src_block, conn.src_port,
-                            conn.dst_block, conn.dst_port)
-                _refresh_feedback_sides!(diagram, block_centers, block_visuals)
-                status[] = "Connection deleted"
+                # Defensive get: the connection may already be gone if it was
+                # removed behind the selection (e.g. port reconfiguration).
+                cv = get(conn_visuals, conn, nothing)
+                if cv !== nothing
+                    _push_undo!(DeleteConnectionAction(conn.src_block, conn.src_port,
+                                                       conn.dst_block, conn.dst_port))
+                    delete!(ax, cv.curve)
+                    delete!(ax, cv.arrow)
+                    delete!(conn_visuals, conn)
+                    disconnect!(diagram, conn.src_block, conn.src_port,
+                                conn.dst_block, conn.dst_port)
+                    _refresh_feedback_sides!(diagram, block_centers, block_visuals)
+                    status[] = "Connection deleted"
+                end
             elseif selected[] !== nothing
                 block = selected[]
                 removed = Tuple{AbstractBlock, Symbol, AbstractBlock, Symbol}[
@@ -1413,39 +1548,43 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         end
     end
 
-    # ── Palette: category menu + search ──────────────────────────────────────
+    # ── Palette: collapsible Toggle categories (Section 5 wireframe) ──────────
     pal_items        = Ref{Vector{Any}}(Any[])
     next_content_row = Ref(4)   # rows 1-3: header / menu / search
-    active_cat       = Ref{String}("All")
+    active_cat       = Ref{String}("All categories")
     search_obs       = Observable("")
+    cat_expanded     = Dict("Sources" => true, "Math" => false, "Sinks" => false)
+    pal_scroll       = Ref(0)   # index of the first visible palette entry
 
-    # Palette data: (icon_sym, border_color, label, factory)
+    # Palette data: (icon_sym, label, factory) — chips use the uniform
+    # Makie-blue accent from the wireframe, independent of block category.
     sources_pal = [
-        ("1",    _BLUE_BORDER, "Constant",       () -> ConstantBlock(0.0)),
-        ("⎍",    _BLUE_BORDER, "Step",           () -> StepBlock()),
-        ("∿",    _BLUE_BORDER, "Sine",           () -> SineBlock()),
-        ("╱",    _BLUE_BORDER, "Ramp",           () -> RampBlock()),
-        ("⏱",    _BLUE_BORDER, "Clock",          () -> ClockBlock()),
+        ("1",    "Constant",       () -> ConstantBlock(0.0)),
+        ("⎍",    "Step",           () -> StepBlock()),
+        ("∿",    "Sine",           () -> SineBlock()),
+        ("╱",    "Ramp",           () -> RampBlock()),
+        ("t",    "Clock",          () -> ClockBlock()),
     ]
     math_pal = [
-        ("▷",    _BLUE_BORDER, "Gain",           () -> GainBlock(1.0)),
-        ("Σ",    _BLUE_BORDER, "Sum",             () -> SumBlock("++")),
-        ("∫",    _BLUE_BORDER, "Integrator",     () -> IntegratorBlock(0.0)),
-        ("z⁻¹",  _BLUE_BORDER, "Unit Delay",     () -> UnitDelayBlock(0.0)),
-        ("×",    _BLUE_BORDER, "Product ×2",     () -> ProductBlock([:mul, :mul])),
-        ("sat",  _BLUE_BORDER, "Saturation",     () -> SaturationBlock()),
-        ("|u|",  _BLUE_BORDER, "Abs",            () -> AbsBlock()),
-        ("d/dt", _BLUE_BORDER, "Derivative",     () -> DerivativeBlock()),
-        ("PID",  _AMGR_BORDER, "PID",            () -> PIDBlock()),
-        ("f(x)", _BLUE_BORDER, "Lookup 1D",      () -> LookupTable1DBlock()),
-        ("H(s)", _BLUE_BORDER, "Transfer Fcn",   () -> TransferFnBlock([1.0], [1.0, 1.0])),
-        ("SS",   _BLUE_BORDER, "State Space",    () -> StateSpaceBlock([-1.0;;], [1.0], [1.0], 0.0)),
+        ("▷",    "Gain",           () -> GainBlock(1.0)),
+        ("Σ",    "Sum",            () -> SumBlock("++")),
+        ("∫",    "Integrator",     () -> IntegratorBlock(0.0)),
+        ("z⁻¹",  "Unit Delay",     () -> UnitDelayBlock(0.0)),
+        ("×",    "Product ×2",     () -> ProductBlock([:mul, :mul])),
+        ("sat",  "Saturation",     () -> SaturationBlock()),
+        ("|u|",  "Abs",            () -> AbsBlock()),
+        ("d/dt", "Derivative",     () -> DerivativeBlock()),
+        ("PID",  "PID",            () -> PIDBlock()),
+        ("f(x)", "Lookup 1D",      () -> LookupTable1DBlock()),
+        ("H(s)", "Transfer Fcn",   () -> TransferFnBlock([1.0], [1.0, 1.0])),
+        ("SS",   "State Space",    () -> StateSpaceBlock([-1.0;;], [1.0], [1.0], 0.0)),
     ]
     sinks_pal = [
-        ("∿",    _GRNN_BORDER, "Scope",          () -> ScopeBlock()),
-        ("ws",   _GRNN_BORDER, "Workspace",      () -> WorkspaceBlock()),
-        ("▪",    _GRNN_BORDER, "Terminator",     () -> TerminatorBlock()),
+        ("∿",    "Scope",          () -> ScopeBlock()),
+        ("ws",   "Workspace",      () -> WorkspaceBlock()),
+        ("▪",    "Terminator",     () -> TerminatorBlock()),
     ]
+    pal_cats = [("Sources", sources_pal), ("Math", math_pal), ("Sinks", sinks_pal)]
 
     function clear_pal!()
         for item in pal_items[]; delete!(item); end
@@ -1454,13 +1593,20 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
         trim!(palette_grid)
     end
 
-    function _pal_block!(sym_text, bdr_color, lbl_text, factory)
+    function _pal_block!(sym_text, lbl_text, factory)
         r = next_content_row[]
         next_content_row[] += 1
+        chip_box = Box(palette_grid[r, 1]; width = 24, height = 20,
+            color = :white, strokecolor = _MAKIE_BLUE, strokewidth = 1,
+            cornerradius = 2)
         chip = Label(palette_grid[r, 1], sym_text;
-            fontsize = 11, halign = :center, valign = :center, color = bdr_color)
-        btn  = Button(palette_grid[r, 2]; label = lbl_text,
-            tellwidth = true, fontsize = 11)
+            fontsize = 10, halign = :center, valign = :center,
+            color = _MAKIE_BLUE, tellwidth = false)
+        btn  = Button(palette_grid[r, 2]; label = lbl_text, height = 30,
+            width = _PAL_CHIP_W, halign = :left, tellwidth = false, fontsize = 12,
+            buttoncolor = :white, strokecolor = _CHIP_BRD, strokewidth = 1,
+            labelcolor = _INK,
+            buttoncolor_hover = RGBf(0.933, 0.957, 0.984))
         on(btn.clicks) do _
             block = factory()
             lim = ax.finallimits[]
@@ -1478,60 +1624,124 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
             _push_undo!(AddBlockAction(block))
             status[] = "Added $(block.name) — drag to position"
         end
+        push!(pal_items[], chip_box)
         push!(pal_items[], chip)
         push!(pal_items[], btn)
     end
 
-    function _pal_category!(label_text, cat_target)
+    # Category header row: "▸/▾ Name" label + expand/collapse Toggle (Section 5)
+    function _pal_cat_header!(cat_name)
         r = next_content_row[]
         next_content_row[] += 1
-        btn = Button(palette_grid[r, 1:2]; label = label_text,
-            tellwidth = true, fontsize = 12)
-        on(btn.clicks) do _
-            active_cat[] = cat_target
-            _build_pal!(cat_target, "")
+        expanded = cat_expanded[cat_name]
+        lbl = Label(palette_grid[r, 1:2], (expanded ? "▾  " : "▸  ") * cat_name;
+            fontsize = 12, font = :bold, halign = :left, tellwidth = false,
+            color = expanded ? _INK : RGBf(0.33, 0.33, 0.33))
+        tg = Toggle(palette_grid[r, 1:2]; active = expanded,
+            halign = :right, tellwidth = false, width = 34, height = 18,
+            framecolor_active   = _MAKIE_BLUE,
+            framecolor_inactive = RGBf(0.737, 0.737, 0.737),
+            buttoncolor = :white)
+        on(tg.active) do v
+            cat_expanded[cat_name] = v
+            _build_pal!(active_cat[], search_obs[])
         end
-        push!(pal_items[], btn)
+        push!(pal_items[], lbl)
+        push!(pal_items[], tg)
+    end
+
+    # Flat entry list (category headers + block chips) for the current menu /
+    # search state — the scroll window shows a slice of this list.
+    function _pal_entries(cat_str, txt)
+        entries = Tuple[]
+        if !isempty(txt)   # non-empty search: flat filtered list, no headers
+            for (_, items) in pal_cats, (sym, lbl, factory) in items
+                occursin(txt, lowercase(lbl)) && push!(entries, (:block, sym, lbl, factory))
+            end
+            return entries
+        end
+        for (cat_name, items) in pal_cats
+            (cat_str == "All categories" || cat_str == cat_name) || continue
+            push!(entries, (:header, cat_name))
+            cat_expanded[cat_name] || continue
+            for (sym, lbl, factory) in items
+                push!(entries, (:block, sym, lbl, factory))
+            end
+        end
+        entries
+    end
+
+    # How many palette rows fit below header/menu/search at the current panel
+    # height: 36 px per slot (30 px chip + gap), ~155 px reserved above/below.
+    function _pal_visible_slots()
+        bb = pal_box.layoutobservables.computedbbox[]
+        max(2, floor(Int, (bb.widths[2] - 155) / 36))
     end
 
     function _build_pal!(cat_str, search_txt)
         clear_pal!()
-        if cat_str == "All" && isempty(search_txt)
-            _pal_category!("Sources",  "Sources")
-            _pal_category!("Math",     "Math")
-            _pal_category!("Sinks",    "Sinks")
-            return
+        entries = _pal_entries(cat_str, lowercase(search_txt))
+        nvis    = _pal_visible_slots()
+        pal_scroll[] = clamp(pal_scroll[], 0, max(0, length(entries) - nvis))
+        off = pal_scroll[]
+        hi  = min(length(entries), off + nvis)
+        for e in entries[(off + 1):hi]
+            e[1] === :header ? _pal_cat_header!(e[2]) : _pal_block!(e[2], e[3], e[4])
         end
-        items = if cat_str == "Sources"
-            sources_pal
-        elseif cat_str == "Math"
-            math_pal
-        elseif cat_str == "Sinks"
-            sinks_pal
-        else
-            vcat(sources_pal, math_pal, sinks_pal)
+        if length(entries) > nvis   # overflow → scroll hint row
+            r = next_content_row[]
+            next_content_row[] += 1
+            hint = Label(palette_grid[r, 1:2],
+                "⇕ scroll — $(off + 1)–$hi of $(length(entries))";
+                fontsize = 10, color = RGBf(0.55, 0.55, 0.55),
+                halign = :center, tellwidth = false)
+            push!(pal_items[], hint)
         end
-        txt = lowercase(search_txt)
-        for (sym, clr, lbl, factory) in items
-            if isempty(txt) || occursin(txt, lowercase(lbl))
-                _pal_block!(sym, clr, lbl, factory)
-            end
-        end
+        # Rows created after a rowgap! call get the default gap again, so the
+        # tight chip spacing must be re-applied after every rebuild.
+        rowgap!(palette_grid, 6)
     end
 
     # Wire category menu and search to palette rebuild
     on(cat_menu.selection) do cat
-        active_cat[] = String(cat)
-        _build_pal!(active_cat[], search_obs[])
+        c = String(cat)
+        active_cat[] = c
+        c == "All categories" || (cat_expanded[c] = true)
+        pal_scroll[] = 0
+        _build_pal!(c, search_obs[])
     end
     on(tb_search.stored_string) do s
         s === nothing && return
         search_obs[] = lowercase(s)
     end
     on(search_obs) do txt
+        pal_scroll[] = 0
         _build_pal!(active_cat[], txt)
     end
-    _build_pal!("All", "")
+    _build_pal!("All categories", "")
+
+    # Mouse wheel over the palette scrolls the entry window (GLMakie grids
+    # have no native scrolling). Consumed so the canvas cannot also zoom.
+    on(events(fig).scroll; priority = 100) do (_, dy)
+        bb = pal_box.layoutobservables.computedbbox[]
+        mp = events(fig).mouseposition[]
+        inside = bb.origin[1] <= mp[1] <= bb.origin[1] + bb.widths[1] &&
+                 bb.origin[2] <= mp[2] <= bb.origin[2] + bb.widths[2]
+        inside || return Consume(false)
+        pal_scroll[] = max(0, pal_scroll[] - 2 * round(Int, dy))
+        _build_pal!(active_cat[], search_obs[])   # clamps the upper bound
+        return Consume(true)
+    end
+
+    # Window resize changes how many rows fit — rebuild only when that count
+    # actually changes (the bbox observable fires on every layout pass).
+    pal_last_slots = Ref(_pal_visible_slots())
+    on(pal_box.layoutobservables.computedbbox) do _
+        n = _pal_visible_slots()
+        n == pal_last_slots[] && return
+        pal_last_slots[] = n
+        _build_pal!(active_cat[], search_obs[])
+    end
 
     # ── Toolbar: SimConfig textboxes ──────────────────────────────────────────
     on(tb_tstart.stored_string) do s
@@ -1620,6 +1830,24 @@ function draw_diagram(diagram::BlockDiagram = BlockDiagram())
     on(btn_clear.clicks) do _
         _clear_all!()
         status[] = "Diagram cleared"
+    end
+
+    # ── Toolbar: zoom cluster ─────────────────────────────────────────────────
+    function _zoom_canvas!(f)
+        lim = ax.finallimits[]
+        cx = lim.origin[1] + lim.widths[1] / 2
+        cy = lim.origin[2] + lim.widths[2] / 2
+        w  = lim.widths[1] * f
+        h  = lim.widths[2] * f
+        limits!(ax, cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2)
+    end
+    on(btn_zoom_in.clicks)  do _; _zoom_canvas!(0.8);  end
+    on(btn_zoom_out.clicks) do _; _zoom_canvas!(1.25); end
+    # finallimits also changes on scroll-wheel zoom and view reset, so the
+    # percentage label stays correct for every zoom path.
+    on(ax.finallimits) do lim
+        pct = round(Int, (_CANVAS_XLIM[2] - _CANVAS_XLIM[1]) / lim.widths[1] * 100)
+        zoom_pct[] = "$(pct)%"
     end
 
     display(fig)

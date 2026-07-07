@@ -30,3 +30,6 @@ JuliaLocalPreferences.toml
 # PackageCompiler sysimage — machine-specific binary, rebuild with build_sysimage.jl
 simulite.dll
 simulite.so
+
+# Design references — local working material
+design/

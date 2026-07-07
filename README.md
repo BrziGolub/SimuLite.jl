@@ -6,7 +6,8 @@ Built as a university thesis project.
 ## Features
 
 - **Interactive GUI** — drag-and-drop canvas, block palette, zoom/pan, undo/redo (buttons + Ctrl+Z / Ctrl+Y)
-- **Double-click to edit** — every block opens a floating properties window on double-click
+- **Block Library panel** — collapsible categories with toggle switches, search box, and mouse-wheel scrolling when the list overflows the window
+- **Double-click to edit** — every block opens a floating properties window (Apply / Cancel); the Transfer Fn block's numerator/denominator coefficients are editable in place
 - **20 built-in blocks** across sources, math, and sinks categories
 - **Simulink-style Sum block** — circular block with per-port `+`/`−` sign glyphs; feedback-fed ports drop to the bottom of the circle
 - **Feedback loops** — closed-loop diagrams work when the cycle contains a memory block (Integrator, UnitDelay, TransferFn, StateSpace); feedback wires route at right angles through a channel below the diagram and enter the bottom of the Sum block. Forward wires stay smooth curves.
@@ -52,10 +53,11 @@ That's it. A full-screen window opens with the block palette on the left and the
 
 | Action | How |
 |---|---|
-| Add block | Click **Sources / Math / Sinks** in the palette → click a block button |
+| Add block | Expand a palette category (toggle switch) or search → click the block chip |
+| Scroll block library | Mouse wheel over the palette when the list overflows (⇕ hint row appears) |
 | Move block | Left-click drag |
 | Select block | Left-click → blue border; press **Delete** to remove |
-| Edit parameters | Double-click any block → floating Properties window |
+| Edit parameters | Double-click any block → Properties window; **Apply** commits, **Cancel** discards |
 | Edit Scope properties | **Ctrl + double-click** a Scope block |
 | Draw wire | Click an output port (red circle) → click an input port (blue circle) |
 | Cancel wire | **Escape** |
@@ -65,7 +67,7 @@ That's it. A full-screen window opens with the block palette on the left and the
 | View scope | Double-click a Scope block after running |
 | Save diagram | Enter filename in toolbar textbox → click **Save** |
 | Load diagram | Enter filename in toolbar textbox → click **Load** |
-| Zoom / pan canvas | Scroll to zoom; double-click empty canvas to reset view |
+| Zoom / pan canvas | Scroll to zoom, or toolbar **− / +** buttons (the % label tracks every zoom); double-click empty canvas to reset view |
 | Clear all | Click **Clear** — closes all open windows and resets the canvas |
 
 ## Mixing CLI and GUI
@@ -120,7 +122,7 @@ result = simulate(d; tspan=(0.0, 5.0), dt=0.01)
 draw_diagram(d)   # open in GUI: feedback wire routes at a right angle into the bottom of `err`
 ```
 
-The loop must contain at least one memory block (Integrator, UnitDelay, TransferFn, or StateSpace with D=0). A cycle of only direct-feedthrough blocks throws `AlgebraicLoopError`.
+The loop must contain at least one memory block (Integrator, UnitDelay, TransferFn/StateSpace with D=0, or an I-only PID with Kp=Kd=0). A cycle of only direct-feedthrough blocks throws `AlgebraicLoopError`, which names the blocks forming the loop and suggests where to insert a memory block.
 
 ## Block Catalog
 
@@ -188,7 +190,8 @@ src/
       sources.jl       — ConstantBlock, StepBlock, SineBlock, RampBlock, ClockBlock
       math.jl          — GainBlock, SumBlock, IntegratorBlock, UnitDelayBlock,
                          ProductBlock, SaturationBlock, AbsBlock,
-                         DerivativeBlock, PIDBlock, LookupTable1DBlock
+                         DerivativeBlock, PIDBlock, LookupTable1DBlock,
+                         TransferFnBlock, StateSpaceBlock
       sinks.jl         — ScopeBlock, WorkspaceBlock, TerminatorBlock
   sim/
     runner.jl          — fixed-step simulation loop

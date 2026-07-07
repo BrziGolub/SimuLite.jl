@@ -280,6 +280,10 @@ function initialize!(b::PIDBlock)
     b.base.outputs[:out].value = 0.0
 end
 
+# An I-only PID (Kp = Kd = 0) outputs Ki·xi — state only, no current-input
+# term — so it can act as a feedback-cycle breaker like an Integrator.
+has_direct_feedthrough(b::PIDBlock) = !(iszero(b.Kp) && iszero(b.Kd))
+
 # ------------------------------------------
 
 mutable struct LookupTable1DBlock <: AbstractBlock
@@ -366,6 +370,30 @@ function TransferFnBlock(num::Vector{Float64}, den::Vector{Float64};
     TransferFnBlock(base, num, den, A_c, B_c, C_c, D_c,
                     zeros(n), zeros(n), zeros(n, n), zeros(n), -1.0,
                     name, position)
+end
+
+"""
+    set_tf_coeffs!(b::TransferFnBlock, num, den)
+
+Replace the transfer function coefficients (highest order first) at runtime.
+Recomputes the state-space realization, resizes the state vectors to the new
+order (state is reset to zero), and invalidates the ZOH discretization cache.
+"""
+function set_tf_coeffs!(b::TransferFnBlock, num::Vector{Float64}, den::Vector{Float64})
+    sys_ss = ControlSystems.ss(ControlSystems.tf(num, den))
+    b.num = num
+    b.den = den
+    b.A_c = Float64.(sys_ss.A)
+    b.B_c = Float64.(vec(sys_ss.B))
+    b.C_c = Float64.(vec(sys_ss.C))
+    b.D_c = Float64(sys_ss.D[1, 1])
+    n = size(b.A_c, 1)
+    b.x         = zeros(n)
+    b.x_next    = zeros(n)
+    b.Φ         = zeros(n, n)
+    b.Γ         = zeros(n)
+    b.dt_cached = -1.0
+    return b
 end
 
 function evaluate!(b::TransferFnBlock, _t, dt)

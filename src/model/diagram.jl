@@ -59,8 +59,29 @@ function get_execution_order(diagram::BlockDiagram)
             remaining = [b for b in blocks if b ∉ in_order]
             idx = findfirst(b -> !has_direct_feedthrough(b), remaining)
             if idx === nothing
+                # Name the cycle members: iteratively trim blocks lacking an
+                # in- or out-edge within the remaining set — the survivors are
+                # the cycle(s); mere downstream blocks are trimmed away.
+                cyc = Set(remaining)
+                changed = true
+                while changed
+                    changed = false
+                    for b in collect(cyc)
+                        has_in  = any(c.dst_block === b && c.src_block ∈ cyc
+                                      for c in diagram.connections)
+                        has_out = any(c.src_block === b && c.dst_block ∈ cyc
+                                      for c in diagram.connections)
+                        if !(has_in && has_out)
+                            delete!(cyc, b)
+                            changed = true
+                        end
+                    end
+                end
+                names = join(sort!([b.name for b in cyc]), ", ")
                 throw(AlgebraicLoopError(
-                    "cycle contains only direct-feedthrough blocks — cannot resolve automatically"))
+                    "algebraic loop through: $names — every block in the loop " *
+                    "has direct feedthrough. Insert a memory block (Integrator, " *
+                    "Unit Delay, or a strictly proper Transfer Fn) into the loop."))
             end
             push!(queue, remaining[idx])
         end
