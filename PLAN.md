@@ -6,7 +6,7 @@ Target: working GUI on top of a solid simulation engine.
 
 ---
 
-## Current state (as of session 2026-07-07 — session 9)
+## Current state (as of session 2026-07-15 — session 11)
 
 ### Simulation engine — COMPLETE
 - Fixed-step discrete runner (`simulate`) — feed-forward chains, integrators, unit delays, feedback loops
@@ -81,7 +81,8 @@ src/
                               TransferFnBlock, StateSpaceBlock
       sinks.jl              — ScopeBlock, WorkspaceBlock, TerminatorBlock
   sim/
-    compiler.jl             — ODE compiler via ModelingToolkit
+    compiler.jl             — stubs for the ODE compiler
+                              (real impl in ext/SimuLiteCompilerExt.jl)
     runner.jl               — fixed-step simulation loop
   gui/
     canvas.jl               — full GUI: canvas, palette (Menu+search),
@@ -89,6 +90,10 @@ src/
                               single-row toolbar (New/Save/Load,
                               Run/Clear, t₀/tstop/Δt),
                               save/load (draw_diagram)
+ext/
+  SimuLiteCompilerExt.jl    — ODE compiler via ModelingToolkit
+                              (package extension; loads with
+                              `using ModelingToolkit, DifferentialEquations`)
 test/
   runtests.jl               — (planned) main test entry point
 ```
@@ -242,27 +247,27 @@ There are two distinct categories of slowness, with different root causes and fi
    - **Result: confirmed faster** — window open, first block, first connection, first properties window all noticeably improved.
    - Rebuild needed after: Julia version upgrade, `Pkg.update()`, or any change to SimuLite source.
 
-3. **Lazy-load `ModelingToolkit` and `DifferentialEquations`** *(medium impact, medium effort)*
-   - These packages add ~10–20 s to `using SimuLite` alone.
-   - Move `compiler.jl` (the MTK ODE path) behind a Julia 1.9+ package extension (`ext/SimuLiteCompilerExt.jl`), loaded only when the user does `using ModelingToolkit`.
-   - `simulate_ode` can remain in the public API but throw a helpful error if the extension is not loaded.
-   - Result: normal GUI startup drops by ~10–20 s; only users who call `simulate_ode` pay that cost.
+3. ~~**Lazy-load `ModelingToolkit` and `DifferentialEquations`**~~ — **DONE** (session 11)
+   - MTK + DiffEq moved from `[deps]` to `[weakdeps]` with an `[extensions]` entry; compiler code moved verbatim to `ext/SimuLiteCompilerExt.jl`.
+   - `src/sim/compiler.jl` now holds varargs stubs for `simulate_ode`/`compile_ode` that throw a helpful "run `using ModelingToolkit, DifferentialEquations`" error; the extension's `::BlockDiagram` methods override them once both weakdeps are loaded.
+   - `[compat] julia` bumped `"1"` → `"1.9"` (extensions require 1.9+).
+   - Dependency closure shrank 517 → 443 packages; `using SimuLite` no longer loads MTK/DiffEq (~10 s total load on dev machine, without sysimage).
+   - **Dev-workflow note:** weakdeps can't be `using`-loaded from a script whose active project is SimuLite itself — to call `simulate_ode`, work in an environment that has SimuLite (dev'd) plus ModelingToolkit + DifferentialEquations installed as regular packages.
+   - Sysimage rebuild recommended (old `simulite.dll` still has MTK baked in; rebuild will be smaller/faster).
 
 #### Category B — Runtime hot-path inefficiencies (affects simulation speed on larger diagrams)
 
-4. **Pre-build adjacency list in `runner.jl`** *(medium impact, low effort)*
-   - The inner loop `for c in diagram.connections` runs once per block per timestep — O(n_blocks × n_connections) per step.
-   - Fix: before the time loop, build `adj = Dict{AbstractBlock, Vector{Connection}}()` keyed by source block. Inner loop becomes `for c in get(adj, b, [])`.
-   - Makes the hot path O(n_connections) per step instead of O(n_blocks × n_connections).
+4. ~~**Pre-build adjacency list in `runner.jl`**~~ — **DONE** (session 11)
+   - `adj = IdDict{AbstractBlock, Vector{Connection}}()` built once before the time loop (IdDict matches the old `===` identity test); inner loop is `for c in get(adj, b, _NO_CONNS)` with a shared empty-vector constant so misses never allocate.
+   - Hot path is now O(n_connections) per step; verified bit-identical `SimResult` on a feedback-loop diagram before/after.
 
-5. **Reduce `_bezier` allocations during drag** *(low impact, low effort)*
-   - `_bezier` allocates two `Vector{Float64}(undef, 60)` every frame for every visible connection when any block is dragged.
-   - Fix: reduce the curve resolution from `n=60` to `n=30` (visually indistinguishable at these scales), and/or pre-allocate shared buffers using a module-level `const _BEZ_XS = Vector{Float64}(undef, 30)`.
-   - Alternatively: skip redrawing connections that are off-screen.
+5. ~~**Reduce `_bezier` allocations during drag**~~ — **DONE** (session 11; re-merged with session 10's orthogonal feedback routing)
+   - Forward-curve resolution halved `n=60` → `n=30` (visually indistinguishable; `_hit_connection` tol 0.12 still well above sample spacing). Feedback wires use session 10's `_ortho_pts` right-angle routing, unchanged.
+   - Forward control-point math extracted into `_bezier_ctrl` (forward-only helper); `_arrowhead` no longer samples a full curve just to use its last 2 points — forward wires get the analytic tangent (cubic bezier tangent at t=1 is along P3 − C1), feedback wires always end with a vertical rise into the port so the arrow direction is a constant (0, 1). Eliminates one `_bezier` call per connection per drag frame.
+   - **Shared module-level buffers were rejected**: Makie retains the exact vectors passed through Observables into `lines!`, so a shared buffer would alias across every connection (all wires would render the last-computed curve).
 
-6. **`_zoh_discretize` caching** *(low impact in practice)*
-   - Already partially addressed via `dt_cached` fields on `TransferFnBlock`/`StateSpaceBlock`.
-   - Confirm the `dt_cached == dt` guard prevents re-discretization on every `evaluate!` call.
+6. ~~**`_zoh_discretize` caching**~~ — **DONE / confirmed** (session 11, no code change)
+   - `evaluate!` for `TransferFnBlock`/`StateSpaceBlock` guards with `!(b.dt_cached ≈ dt)` — ZOH re-discretization runs only when `dt` changes, not per step; `initialize!` resets `dt_cached = -1.0` to force one recompute per run.
 
 ### Polish items (if time allows before thesis demo)
 - ~~Block type label displayed inside the rectangle~~ — **done** (icon zone with type symbol)
@@ -273,6 +278,7 @@ There are two distinct categories of slowness, with different root causes and fi
 - Snap-to-grid for block positioning
 - ~~Undo/redo stack~~ — **done** (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y; covers add/delete/move block, add/delete connection)
 - Rename validation (reject empty names, reject duplicate names before committing)
+- **Dedicated `diagrams/` folder for saved diagrams** — Save/Load in the toolbar should read/write JSON files inside a `diagrams/` subfolder of the repo (create it on first save if missing) instead of dumping them next to the source. Add `diagrams/` to `.gitignore` so saved user diagrams never pollute the repo (the stray `diagram.json` currently sitting untracked in the root is the motivating example — delete or move it when this lands).
 
 ### GUI dependency decision (permanent)
 The GUI stays on **GLMakie only** — no Gtk.jl or Cairo.jl.

@@ -158,14 +158,19 @@ function _ortho_pts(corners; step = 0.06)
     xs, ys
 end
 
+# Control points of the forward S-curve from (x0,y0) to (x1,y1).
+# Only valid for forward connections (x1 >= x0 - 0.1).
+function _bezier_ctrl(x0, y0, x1, y1)
+    dx = max((x1 - x0) * 0.45, 0.35)
+    return (x0 + dx, y0, x1 - dx, y1)
+end
+
 # Route a connection from (x0,y0) to (x1,y1). Forward connections get a smooth
 # S-curve; feedback connections (destination left of source) get a right-angle
 # route through a channel below the blocks, rising vertically into the port.
-function _bezier(x0, y0, x1, y1; n=60)
+function _bezier(x0, y0, x1, y1; n=30)
     if x1 >= x0 - 0.1
-        dx = max((x1 - x0) * 0.45, 0.35)
-        cx0, cy0 = x0 + dx, y0
-        cx1, cy1 = x1 - dx, y1
+        cx0, cy0, cx1, cy1 = _bezier_ctrl(x0, y0, x1, y1)
         xs = Vector{Float64}(undef, n)
         ys = Vector{Float64}(undef, n)
         for i in 1:n
@@ -185,9 +190,17 @@ function _bezier(x0, y0, x1, y1; n=60)
 end
 
 function _arrowhead(src::Point2f, dst::Point2f)
-    xs, ys = _bezier(src[1], src[2], dst[1], dst[2])
-    n = length(xs)
-    ddx, ddy = xs[n] - xs[n-1], ys[n] - ys[n-1]
+    x0, y0 = Float64(src[1]), Float64(src[2])
+    x1, y1 = Float64(dst[1]), Float64(dst[2])
+    if x1 >= x0 - 0.1
+        # Cubic bezier tangent at t=1 points along P3 − C1 — no need to
+        # sample the whole curve just to orient the arrowhead.
+        _, _, cx1, cy1 = _bezier_ctrl(x0, y0, x1, y1)
+        ddx, ddy = x1 - cx1, y1 - cy1
+    else
+        # Orthogonal feedback route always ends with a vertical rise into the port.
+        ddx, ddy = 0.0, 1.0
+    end
     len = sqrt(ddx^2 + ddy^2)
     len < 1e-10 && return Point2f[dst, dst, dst]
     ux, uy = ddx / len, ddy / len

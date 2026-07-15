@@ -20,9 +20,11 @@ Built as a university thesis project.
 - Julia 1.9+
 - Dependencies (installed automatically via `Pkg`):
   - [GLMakie](https://github.com/MakieOrg/Makie.jl) — GUI and plotting
-  - [DifferentialEquations.jl](https://github.com/SciML/DifferentialEquations.jl) — ODE solver backend
-  - [ModelingToolkit.jl](https://github.com/SciML/ModelingToolkit.jl) — symbolic ODE compiler
   - [JSON3.jl](https://github.com/quinnj/JSON3.jl) — diagram save/load
+- Optional (weak) dependencies — only needed for the symbolic ODE backend (`simulate_ode`):
+  - [ModelingToolkit.jl](https://github.com/SciML/ModelingToolkit.jl) — symbolic ODE compiler
+  - [DifferentialEquations.jl](https://github.com/SciML/DifferentialEquations.jl) — ODE solver
+  - Install them in your environment and `using ModelingToolkit, DifferentialEquations` activates the backend automatically
 
 ## Installation
 
@@ -168,7 +170,10 @@ The loop must contain at least one memory block (Integrator, UnitDelay, Transfer
 result = simulate(diagram)
 result = simulate(diagram; tspan=(0.0, 10.0), dt=0.01)
 
-# Symbolic ODE compiler via ModelingToolkit (more accurate for integrators)
+# Symbolic ODE compiler via ModelingToolkit (more accurate for integrators).
+# Requires the optional dependencies — install once with
+#   import Pkg; Pkg.add(["ModelingToolkit", "DifferentialEquations"])
+using ModelingToolkit, DifferentialEquations   # activates the ODE backend
 result = simulate_ode(diagram)
 
 # Accessing results
@@ -195,9 +200,11 @@ src/
       sinks.jl         — ScopeBlock, WorkspaceBlock, TerminatorBlock
   sim/
     runner.jl          — fixed-step simulation loop
-    compiler.jl        — ODE compiler via ModelingToolkit
+    compiler.jl        — stubs for the ODE backend (real impl in ext/)
   gui/
     canvas.jl          — full GUI (draw_diagram)
+ext/
+  SimuLiteCompilerExt.jl — ODE compiler via ModelingToolkit (package extension)
 ```
 
 ## License

@@ -7,6 +7,9 @@ import ..BlocksAPI: evaluate!, commit_state!, initialize!
 
 export simulate
 
+# Shared empty vector so `get(adj, b, _NO_CONNS)` never allocates on miss.
+const _NO_CONNS = Connection[]
+
 function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing, continue_sim=false)
 
     tspan = something(tspan, diagram.config.tspan)
@@ -16,6 +19,13 @@ function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing, continue_sim
     t = t0
 
     order = get_execution_order(diagram)
+
+    # Source block → outgoing connections. IdDict matches the previous
+    # `c.src_block === b` identity semantics exactly.
+    adj = IdDict{AbstractBlock, Vector{Connection}}()
+    for c in diagram.connections
+        push!(get!(() -> Connection[], adj, c.src_block), c)
+    end
 
     if !continue_sim
         # Clear every output port first so non-stateful blocks (Sum, Gain, …)
@@ -54,11 +64,9 @@ function simulate(diagram::BlockDiagram; tspan=nothing, dt=nothing, continue_sim
         # after it evaluates, so the next sorted block always reads fresh values.
         for b in order
             evaluate!(b, t, dt)
-            for c in diagram.connections
-                if c.src_block === b
-                    c.dst_block.base.inputs[c.dst_port].value =
-                        b.base.outputs[c.src_port].value
-                end
+            for c in get(adj, b, _NO_CONNS)
+                c.dst_block.base.inputs[c.dst_port].value =
+                    b.base.outputs[c.src_port].value
             end
         end
 
